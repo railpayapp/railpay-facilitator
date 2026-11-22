@@ -1,3 +1,39 @@
+/** Fixed-window counter per key. In memory: per process (Node) or per isolate (Workers). */
+export class RateLimiter {
+  private windows = new Map<string, { start: number; count: number }>();
+
+  /**
+   * @param limit requests per window per key. 0 disables the limiter.
+   * @param windowMs window length.
+   */
+  constructor(
+    readonly limit: number,
+    readonly windowMs: number,
+    private now: () => number = Date.now,
+  ) {
+    if (!Number.isInteger(limit) || limit < 0) throw new RangeError("limit must be a non-negative integer");
+  }
+
+  /** Count one request for `key`. Returns null when allowed, else the seconds until the window resets. */
+  take(key: string): number | null {
+    if (this.limit === 0) return null;
+    const t = this.now();
+    const w = this.windows.get(key);
+    if (!w || t - w.start >= this.windowMs) {
+      if (this.windows.size > 10_000) this.sweep(t);
+      this.windows.set(key, { start: t, count: 1 });
+      return null;
+    }
+    if (w.count >= this.limit) return Math.max(1, Math.ceil((w.start + this.windowMs - t) / 1000));
+    w.count++;
+    return null;
+  }
+
+  private sweep(t: number) {
+    for (const [k, w] of this.windows) if (t - w.start >= this.windowMs) this.windows.delete(k);
+  }
+}
+
 export class QueueTimeoutError extends Error {
   constructor() {
     super("timed out waiting for the settlement queue");

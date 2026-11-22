@@ -6,14 +6,29 @@ import type { Facilitator } from "./facilitator.js";
 import { ErrorReason, type SettleResponse, type VerifyResponse } from "./types.js";
 
 export type AppOptions = {
+  /** The caller's IP for the per-IP rate limit. Undefined (or no IP) = not limited by IP. */
+  clientIp?: (c: Context) => string | undefined;
   /** Largest request body accepted, bytes. Default 16 KiB. */
   maxBodyBytes?: number;
 };
 
 /**
+ * The client IP from an X-Forwarded-For header written by one trusted reverse proxy: the last entry, the one that
+ * proxy appended. Earlier entries come from the client and can be forged.
+ */
+export function lastForwardedFor(header: string | undefined): string | undefined {
+  return header
+    ?.split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .at(-1);
+}
+
+/**
  * The x402 facilitator HTTP API (spec section 7): `POST /verify`, `POST /settle` and `GET /supported`.
  * Protocol outcomes, valid or not, answer 200 with the spec body. Other statuses: 400 malformed JSON, 413 body too
- * large, 503 settlement unavailable (operator out of gas, queue busy), 502 the RPC refused the transaction.
+ * large, 429 rate limited, 503 settlement unavailable (operator out of gas, queue busy), 502 the RPC refused the
+ * transaction. 429 and 503 carry Retry-After.
  * Every error body keeps the spec shape, so a client that reads the JSON regardless of status still understands it.
  */
 export function createApp(facilitator: Facilitator, options: AppOptions = {}) {
@@ -39,6 +54,11 @@ export function createApp(facilitator: Facilitator, options: AppOptions = {}) {
     }
   }
 
+  function ipWait(c: Context): number | null {
+    const ip = options.clientIp?.(c);
+    return ip ? facilitator.limitIp(ip) : null;
+  }
+
   app.get("/", (c) =>
     c.json({
       name: "railpay-facilitator",
@@ -50,6 +70,8 @@ export function createApp(facilitator: Facilitator, options: AppOptions = {}) {
         minAmount: facilitator.limits.minAmount.toString(),
         maxAmount: facilitator.limits.maxAmount.toString(),
         payToAllowlist: facilitator.limits.payToAllowlist,
+        payToPerHour: facilitator.limits.payToPerHour,
+        ipPerMinute: facilitator.limits.ipPerMinute,
       },
       endpoints: ["POST /verify", "POST /settle", "GET /supported"],
       docs: "https://github.com/railpayapp/railpay-facilitator",
@@ -62,6 +84,11 @@ export function createApp(facilitator: Facilitator, options: AppOptions = {}) {
     "/verify",
     bodyLimit({ maxSize, onError: (c) => c.json(verifyError(ErrorReason.invalidPayload, `The request body is larger than ${maxSize} bytes`), 413) }),
     async (c) => {
+      const wait = ipWait(c);
+      if (wait !== null) {
+        c.header("retry-after", String(wait));
+        return c.json(verifyError(ErrorReason.unexpectedVerify, `Too many requests from this IP. Retry in ${wait} s.`), 429);
+      }
       const j = await readJson(c);
       if (!j.ok) return c.json(verifyError(ErrorReason.invalidPayload, j.message), 400);
       return c.json(await facilitator.verifyRequest(j.body));
@@ -72,10 +99,15 @@ export function createApp(facilitator: Facilitator, options: AppOptions = {}) {
     "/settle",
     bodyLimit({ maxSize, onError: (c) => c.json(settleError(ErrorReason.invalidPayload, `The request body is larger than ${maxSize} bytes`), 413) }),
     async (c) => {
+      const wait = ipWait(c);
+      if (wait !== null) {
+        c.header("retry-after", String(wait));
+        return c.json(settleError(ErrorReason.unexpectedSettle, `Too many requests from this IP. Retry in ${wait} s.`), 429);
+      }
       const j = await readJson(c);
       if (!j.ok) return c.json(settleError(ErrorReason.invalidPayload, j.message), 400);
       const out = await facilitator.settleRequest(j.body);
-      if (out.status === 503) c.header("retry-after", "5");
+      if (out.retryAfter !== undefined) c.header("retry-after", String(out.retryAfter));
       return c.json(out.body, out.status as 200);
     },
   );

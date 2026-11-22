@@ -14,6 +14,8 @@ export type FacilitatorEnv = {
   MAX_AMOUNT?: string;
   /** Comma or space separated addresses. */
   PAY_TO_ALLOWLIST?: string;
+  RATE_LIMIT_PAYTO_PER_HOUR?: string;
+  RATE_LIMIT_IP_PER_MINUTE?: string;
   VALIDITY_MARGIN_SECONDS?: string;
   RECEIPT_TIMEOUT_MS?: string;
   MAX_GAS?: string;
@@ -76,6 +78,7 @@ export function loadConfig(env: FacilitatorEnv): Omit<FacilitatorOptions, "trans
     minAmount,
     maxAmount,
     payToAllowlist: allow,
+    rateLimits: { payToPerHour: int("RATE_LIMIT_PAYTO_PER_HOUR", env.RATE_LIMIT_PAYTO_PER_HOUR), ipPerMinute: int("RATE_LIMIT_IP_PER_MINUTE", env.RATE_LIMIT_IP_PER_MINUTE) },
     validityMarginSeconds: int("VALIDITY_MARGIN_SECONDS", env.VALIDITY_MARGIN_SECONDS),
     receiptTimeoutMs: int("RECEIPT_TIMEOUT_MS", env.RECEIPT_TIMEOUT_MS, 1000),
     maxGas: maxGas === undefined ? undefined : BigInt(maxGas),

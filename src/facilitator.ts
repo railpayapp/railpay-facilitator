@@ -3,7 +3,7 @@ import { privateKeyToAccount } from "viem/accounts";
 
 import { createChain, matchingTransfers, RpcError, transferCalldata, type Revert, type RpcReceipt } from "./chain.js";
 import { AUTHORIZATION_TYPES, CHAIN_ID, DEFAULT_MAX_AMOUNT, DEFAULT_MIN_AMOUNT, DEFAULT_RPC_URL, USDG, USDG_DECIMALS, USDG_EIP712 } from "./constants.js";
-import { Mutex, QueueTimeoutError } from "./limits.js";
+import { Mutex, QueueTimeoutError, RateLimiter } from "./limits.js";
 import { parsePayment, parseRequestBody, type AssetConfig, type Failure, type ParsedPayment, type ParseResult } from "./parse.js";
 import { memoryStore, type SettlementRecord, type SettlementStore } from "./store.js";
 import { ErrorReason, type SettleResponse, type SupportedResponse, type VerifyResponse } from "./types.js";
@@ -26,6 +26,11 @@ export type FacilitatorOptions = {
   maxAmount?: bigint;
   /** Settle only payments to these addresses. Default: any payTo. */
   payToAllowlist?: readonly string[];
+  /**
+   * In-memory limits (per process). `payToPerHour`: new settlements per payTo per hour, default 120.
+   * `ipPerMinute`: requests per client IP per minute, applied by the HTTP app through `limitIp`, default 60. 0 disables.
+   */
+  rateLimits?: { payToPerHour?: number; ipPerMinute?: number };
   /** `validBefore` must be at least this many seconds in the future. Default 6. */
   validityMarginSeconds?: number;
   /** Refuse to settle when the gas estimate is above this. Default 300000 (a USDG transferWithAuthorization uses about 50000). */
@@ -48,8 +53,8 @@ export type FacilitatorOptions = {
   log?: (event: string, fields: Record<string, unknown>) => void;
 };
 
-/** An answer plus the HTTP status the server should use. */
-export type Outcome<T> = { status: number; body: T };
+/** An answer plus the HTTP status the server should use, and a Retry-After in seconds for 429 and 503. */
+export type Outcome<T> = { status: number; body: T; retryAfter?: number };
 
 /** Keep a record this long after the authorization's validBefore, then it may be pruned. */
 const RETAIN_AFTER_EXPIRY_MS = 60 * 60 * 1000;
@@ -83,6 +88,8 @@ export function createFacilitator(options: FacilitatorOptions) {
   const fail = (reason: ErrorReason, message: string): Failure => ({ ok: false, reason, message });
   const chain = createChain({ asset, rpcUrl: options.rpcUrl ?? DEFAULT_RPC_URL, transport: options.transport });
   const sender = new Mutex();
+  const payToLimiter = new RateLimiter(options.rateLimits?.payToPerHour ?? 120, 60 * 60 * 1000, now);
+  const ipLimiter = new RateLimiter(options.rateLimits?.ipPerMinute ?? 60, 60 * 1000, now);
   /** Authorizations this process is settling right now. */
   const inflight = new Set<string>();
   let chainChecked = false;
@@ -203,8 +210,9 @@ export function createFacilitator(options: FacilitatorOptions) {
   }
 
   async function settleParsed(r: ParseResult): Promise<Outcome<SettleResponse>> {
-    const no = (reason: ErrorReason, message: string, opts: { status?: number; tx?: string; payer?: string } = {}): Outcome<SettleResponse> => ({
+    const no = (reason: ErrorReason, message: string, opts: { status?: number; tx?: string; payer?: string; retryAfter?: number } = {}): Outcome<SettleResponse> => ({
       status: opts.status ?? 200,
+      ...(opts.retryAfter !== undefined ? { retryAfter: opts.retryAfter } : opts.status === 503 ? { retryAfter: 5 } : {}),
       body: { success: false, errorReason: reason, errorMessage: message, transaction: opts.tx ?? "", network, ...(opts.payer ? { payer: opts.payer } : {}) },
     });
     if (!r.ok) return no(r.reason, r.message, { payer: r.payer });
@@ -309,7 +317,13 @@ export function createFacilitator(options: FacilitatorOptions) {
       return no(bad.reason, bad.message, { payer });
     }
 
-    // 3. Claim: one settlement per authorization, across every process sharing the store.
+    // 3. Rate limit new settlements per payTo (a restart after a dead transaction was already counted).
+    if (!restartFrom) {
+      const wait = payToLimiter.take(p.payTo.toLowerCase());
+      if (wait !== null) return no(ErrorReason.unexpectedSettle, `Too many settlements to this payTo. Retry in ${wait} s.`, { status: 429, retryAfter: wait, payer });
+    }
+
+    // 4. Claim: one settlement per authorization, across every process sharing the store.
     const t = now();
     const claimed: SettlementRecord = {
       state: "settling",
@@ -324,7 +338,7 @@ export function createFacilitator(options: FacilitatorOptions) {
     else if (!(await store.claim(k, claimed))) return no(ErrorReason.invalidTransactionState, "This authorization is already being settled by this facilitator", { payer });
     inflight.add(k);
 
-    // 4. One sender: gas, nonce, sign, persist, broadcast, receipt.
+    // 5. One sender: gas, nonce, sign, persist, broadcast, receipt.
     let release: (() => void) | null = null;
     let persisted = false;
     try {
@@ -404,7 +418,16 @@ export function createFacilitator(options: FacilitatorOptions) {
     network,
     chainId,
     asset,
-    limits: { minAmount, maxAmount, payToAllowlist: allowlist ? [...allowlist].map((a) => getAddress(a)) : null },
+    limits: {
+      minAmount,
+      maxAmount,
+      payToAllowlist: allowlist ? [...allowlist].map((a) => getAddress(a)) : null,
+      payToPerHour: payToLimiter.limit,
+      ipPerMinute: ipLimiter.limit,
+    },
+
+    /** Count one request from a client IP. Null = allowed, else seconds to wait. */
+    limitIp: (ip: string): number | null => ipLimiter.take(ip),
 
     /** Read-only: is this payment valid right now? Never writes state or sends a transaction. */
     verify: (paymentPayload: unknown, paymentRequirements: unknown): Promise<VerifyResponse> =>
