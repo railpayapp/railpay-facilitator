@@ -13,4 +13,16 @@ export default defineConfig([
     outDir: "dist",
     platform: "neutral",
   },
+  {
+    // Node only: the runnable server (`node dist/node.js`).
+    entry: ["src/node.ts"],
+    format: ["esm"],
+    dts: false,
+    sourcemap: true,
+    clean: false,
+    splitting: false,
+    target: "node22",
+    outDir: "dist",
+    platform: "node",
+  },
 ]);
