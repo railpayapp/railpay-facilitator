@@ -45,6 +45,9 @@
     "payments",
     "stablecoin"
   ],
+  "dependencies": {
+    "viem": "2.58.2"
+  },
   "devDependencies": {
     "@types/node": "26.1.1",
     "tsup": "8.5.1",
