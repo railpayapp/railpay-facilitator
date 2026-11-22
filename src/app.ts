@@ -25,7 +25,8 @@ export function lastForwardedFor(header: string | undefined): string | undefined
 }
 
 /**
- * The x402 facilitator HTTP API (spec section 7): `POST /verify`, `POST /settle` and `GET /supported`.
+ * The x402 facilitator HTTP API (spec section 7): `POST /verify`, `POST /settle`, `GET /supported`, plus `GET /health`
+ * (200 when settlement is open, 503 when it is paused: low operator ETH, RPC down or on the wrong chain).
  * Protocol outcomes, valid or not, answer 200 with the spec body. Other statuses: 400 malformed JSON, 413 body too
  * large, 429 rate limited, 503 settlement unavailable (operator out of gas, queue busy), 502 the RPC refused the
  * transaction. 429 and 503 carry Retry-After.
@@ -73,12 +74,17 @@ export function createApp(facilitator: Facilitator, options: AppOptions = {}) {
         payToPerHour: facilitator.limits.payToPerHour,
         ipPerMinute: facilitator.limits.ipPerMinute,
       },
-      endpoints: ["POST /verify", "POST /settle", "GET /supported"],
+      endpoints: ["POST /verify", "POST /settle", "GET /supported", "GET /health"],
       docs: "https://github.com/railpayapp/railpay-facilitator",
     }),
   );
 
   app.get("/supported", (c) => c.json(facilitator.supported()));
+
+  app.get("/health", async (c) => {
+    const h = await facilitator.health();
+    return c.json(h, h.ok ? 200 : 503);
+  });
 
   app.post(
     "/verify",
@@ -112,7 +118,7 @@ export function createApp(facilitator: Facilitator, options: AppOptions = {}) {
     },
   );
 
-  const routes: Record<string, string> = { "/": "GET", "/supported": "GET", "/verify": "POST", "/settle": "POST" };
+  const routes: Record<string, string> = { "/": "GET", "/supported": "GET", "/health": "GET", "/verify": "POST", "/settle": "POST" };
   app.all("*", (c) => {
     const allow = routes[c.req.path];
     if (allow) {

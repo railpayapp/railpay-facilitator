@@ -103,3 +103,22 @@ export type SupportedResponse = {
   extensions: string[];
   signers: Record<string, string[]>;
 };
+
+/** Answer of `GET /health` (not part of the x402 spec). */
+export type HealthResponse = {
+  ok: boolean;
+  version: string;
+  network: string;
+  chainId: number;
+  /** Chain id the RPC reports, null when the RPC could not be reached. */
+  rpcChainId: number | null;
+  asset: string;
+  operator: string;
+  /** Operator ETH balance in wei (decimal string), null when the RPC could not be reached. */
+  ethBalance: string | null;
+  /** Threshold below which settlement is refused, in wei. */
+  minEthBalance: string;
+  /** False when `/settle` refuses new payments (low gas, RPC down or on the wrong chain). */
+  canSettle: boolean;
+  reason?: string;
+};

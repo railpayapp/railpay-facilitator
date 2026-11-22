@@ -3,6 +3,7 @@ export { ErrorReason } from "./types.js";
 export type {
   AuthorizationFields,
   FacilitatorRequest,
+  HealthResponse,
   PaymentPayload,
   PaymentRequirements,
   ResourceInfo,

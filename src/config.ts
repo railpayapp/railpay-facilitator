@@ -1,4 +1,4 @@
-import { isAddress, type Hex } from "viem";
+import { isAddress, parseEther, parseGwei, type Hex } from "viem";
 
 import { DEFAULT_RPC_URL, USDG_DECIMALS } from "./constants.js";
 import type { FacilitatorOptions } from "./facilitator.js";
@@ -16,6 +16,10 @@ export type FacilitatorEnv = {
   PAY_TO_ALLOWLIST?: string;
   RATE_LIMIT_PAYTO_PER_HOUR?: string;
   RATE_LIMIT_IP_PER_MINUTE?: string;
+  /** ETH decimal, e.g. "0.0005". */
+  MIN_OPERATOR_ETH?: string;
+  /** Gwei decimal, e.g. "1". */
+  MAX_FEE_PER_GAS_GWEI?: string;
   VALIDITY_MARGIN_SECONDS?: string;
   RECEIPT_TIMEOUT_MS?: string;
   MAX_GAS?: string;
@@ -71,6 +75,18 @@ export function loadConfig(env: FacilitatorEnv): Omit<FacilitatorOptions, "trans
   if (minAmount !== undefined && minAmount < 1n) throw new ConfigError("MIN_AMOUNT must be more than 0");
   if (minAmount !== undefined && maxAmount !== undefined && maxAmount < minAmount) throw new ConfigError("MAX_AMOUNT must be at least MIN_AMOUNT");
 
+  const decimal = (name: string, v: string | undefined, parse: (s: string) => bigint) =>
+    blank(v)
+      ? undefined
+      : wrap(name, () => {
+          const t = (v as string).trim();
+          if (!/^\d+(\.\d+)?$/.test(t)) throw new Error();
+          return parse(t);
+        });
+  const minOperatorEth = decimal("MIN_OPERATOR_ETH", env.MIN_OPERATOR_ETH, parseEther);
+  const maxFeePerGas = decimal("MAX_FEE_PER_GAS_GWEI", env.MAX_FEE_PER_GAS_GWEI, parseGwei);
+  if (maxFeePerGas === 0n) throw new ConfigError("MAX_FEE_PER_GAS_GWEI must be more than 0");
+
   const maxGas = int("MAX_GAS", env.MAX_GAS, 21_000);
   return {
     operatorKey: operatorKey as Hex,
@@ -82,5 +98,7 @@ export function loadConfig(env: FacilitatorEnv): Omit<FacilitatorOptions, "trans
     validityMarginSeconds: int("VALIDITY_MARGIN_SECONDS", env.VALIDITY_MARGIN_SECONDS),
     receiptTimeoutMs: int("RECEIPT_TIMEOUT_MS", env.RECEIPT_TIMEOUT_MS, 1000),
     maxGas: maxGas === undefined ? undefined : BigInt(maxGas),
+    minOperatorEth,
+    maxFeePerGas,
   };
 }

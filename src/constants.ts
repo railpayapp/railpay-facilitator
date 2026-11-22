@@ -22,6 +22,8 @@ export const DEFAULT_RPC_URL = "https://robinhood-rpc.publicnode.com";
 export const DEFAULT_MIN_AMOUNT = 1_000n;
 /** Default largest payment this facilitator settles: 100 USDG (base units). */
 export const DEFAULT_MAX_AMOUNT = 100_000_000n;
+/** Default ETH the operator must hold before it settles anything: 0.0005 ETH (wei). */
+export const DEFAULT_MIN_OPERATOR_ETH = 500_000_000_000_000n;
 
 export const EXPLORER = "https://robinhoodchain.blockscout.com";
 export const txUrl = (hash: string) => `${EXPLORER}/tx/${hash}`;

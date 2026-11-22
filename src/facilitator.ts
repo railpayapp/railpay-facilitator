@@ -1,12 +1,23 @@
-import { getAddress, isAddress, keccak256, recoverTypedDataAddress, type Address, type Hex, type Transport } from "viem";
+import { formatEther, getAddress, isAddress, keccak256, recoverTypedDataAddress, type Address, type Hex, type Transport } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
 import { createChain, matchingTransfers, RpcError, transferCalldata, type Revert, type RpcReceipt } from "./chain.js";
-import { AUTHORIZATION_TYPES, CHAIN_ID, DEFAULT_MAX_AMOUNT, DEFAULT_MIN_AMOUNT, DEFAULT_RPC_URL, USDG, USDG_DECIMALS, USDG_EIP712 } from "./constants.js";
+import {
+  AUTHORIZATION_TYPES,
+  CHAIN_ID,
+  DEFAULT_MAX_AMOUNT,
+  DEFAULT_MIN_AMOUNT,
+  DEFAULT_MIN_OPERATOR_ETH,
+  DEFAULT_RPC_URL,
+  USDG,
+  USDG_DECIMALS,
+  USDG_EIP712,
+  VERSION,
+} from "./constants.js";
 import { Mutex, QueueTimeoutError, RateLimiter } from "./limits.js";
 import { parsePayment, parseRequestBody, type AssetConfig, type Failure, type ParsedPayment, type ParseResult } from "./parse.js";
 import { memoryStore, type SettlementRecord, type SettlementStore } from "./store.js";
-import { ErrorReason, type SettleResponse, type SupportedResponse, type VerifyResponse } from "./types.js";
+import { ErrorReason, type HealthResponse, type SettleResponse, type SupportedResponse, type VerifyResponse } from "./types.js";
 import { fromUnits } from "./units.js";
 
 export type FacilitatorOptions = {
@@ -33,8 +44,12 @@ export type FacilitatorOptions = {
   rateLimits?: { payToPerHour?: number; ipPerMinute?: number };
   /** `validBefore` must be at least this many seconds in the future. Default 6. */
   validityMarginSeconds?: number;
+  /** Refuse to settle while the operator holds less ETH than this (wei). Default 0.0005 ETH. */
+  minOperatorEth?: bigint;
   /** Refuse to settle when the gas estimate is above this. Default 300000 (a USDG transferWithAuthorization uses about 50000). */
   maxGas?: bigint;
+  /** Refuse to settle while the base fee is above this (wei per gas), and never offer more. Default: no cap. */
+  maxFeePerGas?: bigint;
   /**
    * How long `settle` waits for the receipt before answering `settlement_pending`. Default 20000 ms.
    * A later `settle` with the same payload reconciles: it rebroadcasts the identical signed transaction and waits up to
@@ -77,7 +92,10 @@ export function createFacilitator(options: FacilitatorOptions) {
   const allowlist = options.payToAllowlist?.length ? new Set(options.payToAllowlist.map((a) => a.toLowerCase())) : null;
   const margin = options.validityMarginSeconds ?? 6;
   if (!Number.isInteger(margin) || margin < 0) throw new RangeError("validityMarginSeconds must be a non-negative integer");
+  const minOperatorEth = options.minOperatorEth ?? DEFAULT_MIN_OPERATOR_ETH;
+  if (minOperatorEth < 0n) throw new RangeError("minOperatorEth must not be negative");
   const maxGas = options.maxGas ?? 300_000n;
+  const maxFeeCap = options.maxFeePerGas;
   const receiptTimeoutMs = options.receiptTimeoutMs ?? 20_000;
   const pollMs = options.pollIntervalMs ?? 500;
   const queueTimeoutMs = options.queueTimeoutMs ?? 10_000;
@@ -94,6 +112,8 @@ export function createFacilitator(options: FacilitatorOptions) {
   const inflight = new Set<string>();
   let chainChecked = false;
   let lastPrune = Date.now();
+  let ethCache: { at: number; wei: bigint } | null = null;
+  let healthCache: { at: number; value: HealthResponse } | null = null;
 
   const keyOf = (p: ParsedPayment) => `${network}:${asset.address.toLowerCase()}:${p.auth.from.toLowerCase()}:${p.auth.nonce}`;
 
@@ -202,6 +222,21 @@ export function createFacilitator(options: FacilitatorOptions) {
       await new Promise((res) => setTimeout(res, Math.min(pollMs, Math.max(1, until - Date.now()))));
     }
   }
+
+  /** Operator ETH balance, cached for `maxAgeMs` while it is above the minimum (a low balance is always read again). */
+  async function operatorEth(maxAgeMs: number): Promise<bigint | null> {
+    if (ethCache && ethCache.wei >= minOperatorEth && Date.now() - ethCache.at < maxAgeMs) return ethCache.wei;
+    try {
+      const wei = await chain.ethBalance(operator);
+      ethCache = { at: Date.now(), wei };
+      return wei;
+    } catch {
+      return null;
+    }
+  }
+
+  const lowGasMessage = (wei: bigint) =>
+    `Settlement is paused: the operator holds ${formatEther(wei)} ETH, below the ${formatEther(minOperatorEth)} ETH minimum. The operator needs to add ETH for gas.`;
 
   async function maybePrune() {
     if (Date.now() - lastPrune < PRUNE_EVERY_MS) return;
@@ -317,7 +352,14 @@ export function createFacilitator(options: FacilitatorOptions) {
       return no(bad.reason, bad.message, { payer });
     }
 
-    // 3. Rate limit new settlements per payTo (a restart after a dead transaction was already counted).
+    // 3. Operator guards: enough ETH (before anything is claimed or counted), then the payTo rate limit (a restart
+    //    after a dead transaction was already counted).
+    const wei = await operatorEth(15_000);
+    if (wei === null || wei < minOperatorEth) {
+      if (restartFrom) await store.delete(k); // the dead transaction can never land; the next call starts fresh
+      if (wei === null) return no(ErrorReason.unexpectedSettle, "Could not read the operator's ETH balance. Retry shortly.", { status: 503, payer });
+      return no(ErrorReason.unexpectedSettle, lowGasMessage(wei), { status: 503, payer });
+    }
     if (!restartFrom) {
       const wait = payToLimiter.take(p.payTo.toLowerCase());
       if (wait !== null) return no(ErrorReason.unexpectedSettle, `Too many settlements to this payTo. Retry in ${wait} s.`, { status: 429, retryAfter: wait, payer });
@@ -365,8 +407,16 @@ export function createFacilitator(options: FacilitatorOptions) {
       if (est.gas > maxGas) return await giveUp(ErrorReason.unexpectedSettle, `The gas estimate (${est.gas}) is above this facilitator's limit (${maxGas})`, 503);
       const padded = est.gas + est.gas / 4n;
       const gas = padded > maxGas ? maxGas : padded;
-      const { maxFeePerGas, maxPriorityFeePerGas } = await chain.fees();
+      const fees = await chain.fees();
+      let maxFeePerGas = fees.maxFeePerGas;
+      if (maxFeeCap !== undefined) {
+        if (fees.baseFee > maxFeeCap) return await giveUp(ErrorReason.unexpectedSettle, "Gas is above this facilitator's price cap right now. Retry later.", 503);
+        if (maxFeePerGas > maxFeeCap) maxFeePerGas = maxFeeCap;
+      }
+      const maxPriorityFeePerGas = fees.maxPriorityFeePerGas > maxFeePerGas ? maxFeePerGas : fees.maxPriorityFeePerGas;
       const [nonce, balance] = await Promise.all([chain.nonce(operator, "pending"), chain.ethBalance(operator)]);
+      ethCache = { at: Date.now(), wei: balance };
+      if (balance < minOperatorEth) return await giveUp(ErrorReason.unexpectedSettle, lowGasMessage(balance), 503);
       if (balance < gas * maxFeePerGas) return await giveUp(ErrorReason.unexpectedSettle, "The operator cannot cover the gas of this settlement. The operator needs to add ETH.", 503);
 
       const raw = await account.signTransaction({ chainId, type: "eip1559", to: asset.address, data, nonce, gas, maxFeePerGas, maxPriorityFeePerGas, value: 0n });
@@ -413,6 +463,32 @@ export function createFacilitator(options: FacilitatorOptions) {
     signers: { "eip155:*": [operator] },
   };
 
+  /** Operator ETH, the RPC's chain and whether `/settle` takes new payments. Cached for 5 s. */
+  async function health(): Promise<HealthResponse> {
+    if (healthCache && Date.now() - healthCache.at < 5_000) return healthCache.value;
+    const [rpcChainId, wei] = await Promise.all([chain.chainId().catch(() => null), chain.ethBalance(operator).catch(() => null)]);
+    if (wei !== null) ethCache = { at: Date.now(), wei };
+    let reason: string | undefined;
+    if (rpcChainId === null || wei === null) reason = "The RPC is unreachable";
+    else if (rpcChainId !== chainId) reason = `The RPC is on chain ${rpcChainId}, expected ${chainId}`;
+    else if (wei < minOperatorEth) reason = lowGasMessage(wei);
+    const value: HealthResponse = {
+      ok: reason === undefined,
+      version: VERSION,
+      network,
+      chainId,
+      rpcChainId,
+      asset: asset.address,
+      operator,
+      ethBalance: wei === null ? null : wei.toString(),
+      minEthBalance: minOperatorEth.toString(),
+      canSettle: reason === undefined,
+      ...(reason ? { reason } : {}),
+    };
+    healthCache = { at: Date.now(), value };
+    return value;
+  }
+
   return {
     operator: operator as Address,
     network,
@@ -442,6 +518,7 @@ export function createFacilitator(options: FacilitatorOptions) {
     settleRequest: (body: unknown): Promise<Outcome<SettleResponse>> => settleParsed(parseRequestBody(body, network, asset)),
 
     supported: (): SupportedResponse => supportedResponse,
+    health,
   };
 }
 

@@ -96,7 +96,7 @@ describe("HTTP API", () => {
       name: "railpay-facilitator",
       network: "eip155:4663",
       operator: OPERATOR,
-      endpoints: ["POST /verify", "POST /settle", "GET /supported"],
+      endpoints: ["POST /verify", "POST /settle", "GET /supported", "GET /health"],
     });
   });
 });
