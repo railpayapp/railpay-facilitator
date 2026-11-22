@@ -155,6 +155,18 @@ export class FakeChain {
         await this.call(tx);
         return toHex(this.estimate);
       }
+      case "eth_blockNumber":
+        return toHex(this.block);
+      case "eth_getLogs": {
+        // Logs of mined transactions, filtered by address and topics. Like USDG, the fake emits Transfer only.
+        const q = params[0] as { address?: string; topics?: (string | null)[] };
+        const logs = [...this.receipts.values()].flatMap((r) => r.logs.map((l) => ({ ...l, transactionHash: r.transactionHash, blockNumber: r.blockNumber })));
+        return logs.filter(
+          (l) =>
+            (!q.address || l.address.toLowerCase() === q.address.toLowerCase()) &&
+            (q.topics ?? []).every((t, i) => t === null || t === undefined || l.topics[i]?.toLowerCase() === t.toLowerCase()),
+        );
+      }
       case "eth_getBlockByNumber":
         return { number: toHex(this.block), timestamp: toHex(this.timestamp), baseFeePerGas: toHex(this.baseFee) };
       case "eth_maxPriorityFeePerGas":
