@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.0] - 2026-11-22
+
+Cloudflare Workers, examples and a fork test.
+
+- Cloudflare Workers entry (`railpay-facilitator/worker`, `dist/worker.js`): every request goes to one Durable Object, `RailPayFacilitator`, which is the only sender for the operator key and keeps settlement records in its SQLite storage (`durableObjectStore`). Rate limits use `CF-Connecting-IP`. A misconfigured deployment answers 500 with the variable's name, never its value. Example `wrangler.json` included (no routes).
+- Examples: an SDK seller pointed at your facilitator (`examples/seller.ts`), the facilitator inside your own Hono server behind a bearer token (`examples/embed.ts`), and a Worker project that depends on this package (`examples/worker`).
+- `pnpm test:fork`: opt-in test that settles real payments on a local anvil fork of Robinhood Chain with throwaway keys.
+- `pnpm smoke` works again (it needed an operator key since 0.3.0) and also checks `health()` for an unfunded operator.
+- README: what a facilitator is, self-hosting compared with Toll and Primer, Workers and Node quick starts, the full configuration table, the security model and operator risks, known limitations, and how this relates to the RailPay relayer.
+
 ## [0.4.0] - 2026-11-22
 
 Operator protections.

@@ -182,7 +182,7 @@ A success answer is handed out once per authorization.
 ```json
 {
   "ok": true,
-  "version": "0.4.0",
+  "version": "0.5.0",
   "network": "eip155:4663",
   "chainId": 4663,
   "rpcChainId": 4663,

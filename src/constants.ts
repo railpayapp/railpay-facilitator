@@ -1,5 +1,5 @@
 /** Package version. Kept equal to package.json (a test checks it). */
-export const VERSION = "0.4.0";
+export const VERSION = "0.5.0";
 
 /** Robinhood Chain mainnet (Arbitrum Orbit L2, gas in ETH). */
 export const CHAIN_ID = 4663;
