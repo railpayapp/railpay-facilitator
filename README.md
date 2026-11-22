@@ -6,7 +6,7 @@ A self-hostable [x402](https://www.x402.org) v2 facilitator for [RailPay](https:
 
 An x402 seller answers `402 Payment Required`, the buyer signs a payment, and a **facilitator** checks that payment and settles it on-chain. This package is that facilitator for one network and one token: USDG (Global Dollar, 6 decimals) on Robinhood Chain (chain id 4663), scheme `exact`, with EIP-3009 `TransferWithAuthorization`.
 
-> **Status: v0.1, verification only.** This release checks payments offline: EIP-712 signature, recipient, amount, network and validity window. It does not read the chain yet and it has **no `/settle`**. Do not use it to decide whether to serve a paid resource on its own.
+> **Status: verification only, no `/settle` yet.** `/verify` checks the signature, recipient, amount, network and validity window, then reads the chain: the authorization nonce, the payer's USDG balance and a simulated `transferWithAuthorization`. A valid answer means the payment can settle right now, not that it has. Settlement is coming in the next release.
 
 ## Quick start (Node)
 
@@ -29,6 +29,7 @@ curl -s http://127.0.0.1:8787/supported
 |---|---|---|
 | `PORT` | `8787` | Listen port |
 | `HOST` | `127.0.0.1` | Listen address. Set `0.0.0.0` to accept outside connections |
+| `RPC_URL` | `https://robinhood-rpc.publicnode.com` | Robinhood Chain JSON-RPC. Use your own (Alchemy, dRPC) in production. It may contain an API key: it is never logged or returned in an answer |
 | `VALIDITY_MARGIN_SECONDS` | `6` | `validBefore` must be at least this far in the future |
 
 ## API
@@ -43,7 +44,14 @@ Request and response bodies follow the [x402 v2 specification](https://github.co
 
 Answers `200` with `{ "isValid": true, "payer": "0x…" }` or `{ "isValid": false, "invalidReason": "…", "invalidMessage": "…", "payer": "0x…" }`. `invalidReason` is always one of the spec's error codes (section 9). `invalidMessage` is a readable explanation; it is not in the spec table, and the x402 reference implementation uses the same field.
 
-Checks, in order: x402 version; scheme `exact`; network `eip155:4663`; asset USDG with `extra.name` = `"Global Dollar"` and `extra.version` = `"1"`; `accepted` equal to the requirements; field formats; `authorization.to` = `payTo`; `authorization.value` = `amount` exactly; `validAfter` ≤ now; `validBefore` ≥ now + margin; the EIP-712 signature recovers to `authorization.from`.
+Checks, in order:
+
+1. Request: x402 version 2; scheme `exact`; network `eip155:4663`; asset USDG with `extra.name` = `"Global Dollar"` and `extra.version` = `"1"`; `accepted` equal to the requirements; field formats.
+2. Authorization: `to` = `payTo`; `value` = `amount` exactly; `validAfter` ≤ now; `validBefore` ≥ now + margin.
+3. Signature: the EIP-712 `TransferWithAuthorization` signature recovers to `authorization.from` (EOA payers).
+4. Chain: the RPC reports chain id 4663; `authorizationState(from, nonce)` is false; the payer holds at least `value` USDG; an `eth_call` of `transferWithAuthorization` succeeds. A revert is mapped to a spec code (`insufficient_funds`, `invalid_exact_evm_payload_signature`, otherwise `invalid_transaction_state` with the revert reason in `invalidMessage`). An RPC failure answers `unexpected_verify_error`.
+
+`/verify` never writes state and never sends a transaction. The chain is not read when an offline check already failed.
 
 Malformed JSON answers `400`, a body over 16 KiB `413`, both with the same `VerifyResponse` shape.
 
@@ -58,7 +66,7 @@ Malformed JSON answers `400`, a body over 16 KiB `413`, both with the same `Veri
 ```ts
 import { createFacilitator, createApp } from "railpay-facilitator";
 
-const facilitator = createFacilitator();
+const facilitator = createFacilitator({ rpcUrl: process.env.RPC_URL });
 const result = await facilitator.verify(paymentPayload, paymentRequirements);
 const app = createApp(facilitator); // a Hono app: app.fetch(request)
 ```
@@ -68,9 +76,10 @@ const app = createApp(facilitator); // a Hono app: app.fetch(request)
 ```sh
 pnpm install
 pnpm typecheck && pnpm test && pnpm build
+pnpm smoke   # read-only check against Robinhood Chain: chain id, USDG name and DOMAIN_SEPARATOR, authorizationState, a reverting simulation
 ```
 
-Tests sign real EIP-3009 authorizations with throwaway keys.
+Tests sign real EIP-3009 authorizations with throwaway keys and run against an in-memory chain (a viem custom transport), so they need no network.
 
 ## Links
 
