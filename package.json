@@ -1,6 +1,6 @@
 {
   "name": "railpay-facilitator",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Self-hostable x402 v2 facilitator for Robinhood Chain: verifies and settles exact-scheme USDG payments (EIP-3009) with your own operator key.",
   "license": "MIT",
   "homepage": "https://docs.railpay.app",
