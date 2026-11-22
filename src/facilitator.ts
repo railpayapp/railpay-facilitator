@@ -1,6 +1,6 @@
 import { recoverTypedDataAddress, type Transport } from "viem";
 
-import { createChain, RpcError } from "./chain.js";
+import { createChain, RpcError, transferCalldata, type Revert } from "./chain.js";
 import { AUTHORIZATION_TYPES, CHAIN_ID, DEFAULT_RPC_URL, USDG, USDG_DECIMALS, USDG_EIP712 } from "./constants.js";
 import { parsePayment, parseRequestBody, type AssetConfig, type Failure, type ParsedPayment, type ParseResult } from "./parse.js";
 import { ErrorReason, type SupportedResponse, type VerifyResponse } from "./types.js";
@@ -67,7 +67,21 @@ export function createFacilitator(options: FacilitatorOptions = {}) {
     return null;
   }
 
-  /** On-chain checks: the RPC's chain id, the authorization nonce is unused, the payer holds enough. */
+  /** A failed eth_call of transferWithAuthorization, as an x402 error. */
+  function fromRevert(r: Revert): Failure {
+    const text = `${r.name ?? ""} ${r.message}`;
+    if (r.name === "InsufficientFunds" || /insufficient|exceeds balance/i.test(text)) return fail(ErrorReason.insufficientFunds, "The payer does not hold enough of the token");
+    if (r.name === "InvalidSignature" || /signature/i.test(text)) return fail(ErrorReason.signature, "The token contract rejected the signature");
+    if (/expired/i.test(text)) return fail(ErrorReason.validBefore, "The token contract says the authorization expired");
+    if (/not yet valid/i.test(text)) return fail(ErrorReason.validAfter, "The token contract says the authorization is not valid yet");
+    if (/used|cancel/i.test(text)) return fail(ErrorReason.invalidPayload, "The authorization was already used or canceled");
+    return fail(ErrorReason.invalidTransactionState, `Simulating transferWithAuthorization reverted: ${r.message}`);
+  }
+
+  /**
+   * On-chain checks: the RPC's chain id, the authorization nonce is unused, the payer holds enough, then an eth_call
+   * of transferWithAuthorization (catches anything else the token would refuse: frozen accounts, contract rules).
+   */
   async function chainChecks(p: ParsedPayment): Promise<Failure | null> {
     try {
       const wrongChain = await checkChainId();
@@ -75,7 +89,8 @@ export function createFacilitator(options: FacilitatorOptions = {}) {
       const [used, balance] = await Promise.all([chain.authorizationUsed(p.auth.from, p.auth.nonce), chain.tokenBalance(p.auth.from)]);
       if (used) return fail(ErrorReason.invalidPayload, "This authorization nonce was already used on-chain");
       if (balance < p.auth.value) return fail(ErrorReason.insufficientFunds, "The payer does not hold enough of the token");
-      return null;
+      const revert = await chain.simulate(transferCalldata(p.auth, p.signature));
+      return revert ? fromRevert(revert) : null;
     } catch (e) {
       return fail(ErrorReason.unexpectedVerify, e instanceof RpcError ? `Could not read the chain: ${e.message}` : "Could not read the chain");
     }

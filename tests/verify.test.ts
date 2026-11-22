@@ -2,7 +2,7 @@ import { generatePrivateKey } from "viem/accounts";
 import { describe, expect, it } from "vitest";
 
 import { createFacilitator } from "../src/facilitator.js";
-import { FakeChain } from "./fake-chain.js";
+import { FakeChain, revertData } from "./fake-chain.js";
 import { mutate, NOW_MS, NOW_S, PAY_TO, requirements, signedPayment } from "./helpers.js";
 
 const key = generatePrivateKey();
@@ -84,7 +84,33 @@ describe("verify (on-chain)", () => {
     const chain = new FakeChain();
     const { payload, req } = await signedPayment({ key });
     expect((await facilitator(chain).verify(payload, req)).isValid).toBe(true);
-    expect(chain.count("eth_call")).toBe(2);
+    expect(chain.count("eth_call")).toBe(3); // nonce state, balance, simulation
+  });
+
+  it("simulates transferWithAuthorization and maps the token's revert", async () => {
+    const { payload, req } = await signedPayment({ key });
+    const cases: [string, string][] = [
+      [revertData.insufficientFunds, "insufficient_funds"],
+      [revertData.invalidSignature, "invalid_exact_evm_payload_signature"],
+      [revertData.reason("FiatToken: account is blacklisted"), "invalid_transaction_state"],
+      ["0xdeadbeef", "invalid_transaction_state"],
+    ];
+    for (const [data, expected] of cases) {
+      const chain = new FakeChain();
+      chain.transferRevert = data as `0x${string}`;
+      const r = await facilitator(chain).verify(payload, req);
+      expect(r, data).toMatchObject({ isValid: false, invalidReason: expected });
+    }
+    const chain = new FakeChain();
+    chain.transferRevert = revertData.reason("FiatToken: account is blacklisted");
+    expect((await facilitator(chain).verify(payload, req)).invalidMessage).toContain("blacklisted");
+  });
+
+  it("the simulation runs the real token checks (expiry on the chain clock)", async () => {
+    const chain = new FakeChain();
+    chain.timestamp = NOW_S + 400n; // the chain is ahead of the facilitator's clock
+    const { payload, req } = await signedPayment({ key });
+    expect((await facilitator(chain).verify(payload, req)).invalidReason).toBe("invalid_exact_evm_payload_authorization_valid_before");
   });
 
   it("rejects an authorization whose nonce was already used", async () => {

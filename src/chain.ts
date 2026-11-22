@@ -1,11 +1,29 @@
-import { createPublicClient, decodeFunctionResult, encodeFunctionData, http, parseAbi, type Address, type Hex, type Transport } from "viem";
+import {
+  createPublicClient,
+  decodeErrorResult,
+  decodeFunctionResult,
+  encodeFunctionData,
+  http,
+  parseAbi,
+  parseSignature,
+  type Address,
+  type Hex,
+  type Transport,
+} from "viem";
 
-import type { AssetConfig } from "./parse.js";
+import type { AssetConfig, Authorization } from "./parse.js";
 
 export const TOKEN_ABI = parseAbi([
   "function balanceOf(address owner) view returns (uint256)",
   "function authorizationState(address authorizer, bytes32 nonce) view returns (bool)",
+  "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s)",
 ]);
+
+/**
+ * Custom errors used to explain a failed simulation. InsufficientFunds() and InvalidSignature() are what USDG on
+ * Robinhood Chain reverts with (checked with eth_call). Error(string) and Panic(uint256) are decoded by viem.
+ */
+export const TOKEN_ERRORS = parseAbi(["error InsufficientFunds()", "error InvalidSignature()"]);
 
 /** An RPC call failed. The message never contains the RPC URL (it may hold an API key) or the request body. */
 export class RpcError extends Error {
@@ -49,6 +67,9 @@ export function errorInfo(err: unknown): ErrorInfo {
   return info;
 }
 
+/** A call that the contract reverted. */
+export type Revert = { data?: Hex; name?: string; message: string };
+
 /** A short message that is safe to log and return: no URLs, no request bodies. */
 export function safe(text: string) {
   return text.replace(/https?:\/\/\S+/g, "[url]").replace(/\s+/g, " ").slice(0, 200);
@@ -60,6 +81,35 @@ export function rpcError(method: string, err: unknown): RpcError {
   if (info.code !== undefined && info.code !== -1 && info.message) return new RpcError(method, safe(`${method}: ${info.message}`), true);
   if (info.status !== undefined) return new RpcError(method, `${method}: RPC answered HTTP ${info.status}`, false);
   return new RpcError(method, `${method}: RPC unreachable${info.name ? ` (${info.name})` : ""}`, false);
+}
+
+function isRevert(info: ErrorInfo) {
+  return info.code === 3 || (info.data !== undefined && info.data.length >= 10) || /revert/i.test(info.message ?? "");
+}
+
+/** Name and message of a revert, from the token's known errors, Error(string) or Panic(uint256). */
+export function decodeRevert(data: Hex | undefined, fallback = "execution reverted"): Revert {
+  if (!data || data.length < 10) return { data, message: fallback };
+  try {
+    // viem also decodes the built-in Error(string) and Panic(uint256).
+    const d = decodeErrorResult({ abi: TOKEN_ERRORS, data }) as { errorName: string; args?: readonly unknown[] };
+    if (d.errorName === "Error") return { data, name: "Error", message: String(d.args?.[0] ?? fallback) };
+    if (d.errorName === "Panic") return { data, name: "Panic", message: `panic ${String(d.args?.[0])}` };
+    return { data, name: d.errorName, message: d.errorName };
+  } catch {
+    return { data, message: `reverted with ${data.slice(0, 10)}` };
+  }
+}
+
+/** transferWithAuthorization(from, to, value, validAfter, validBefore, nonce, v, r, s) calldata. */
+export function transferCalldata(auth: Authorization, signature: Hex): Hex {
+  const { r, s, v, yParity } = parseSignature(signature);
+  const vv = Number(v ?? BigInt((yParity ?? 0) + 27));
+  return encodeFunctionData({
+    abi: TOKEN_ABI,
+    functionName: "transferWithAuthorization",
+    args: [auth.from, auth.to, auth.value, auth.validAfter, auth.validBefore, auth.nonce, vv, r, s],
+  });
 }
 
 export type ChainOptions = {
@@ -94,11 +144,27 @@ export function createChain(options: ChainOptions) {
     }
   }
 
+  /** Run a call that may revert. Returns the revert, or throws RpcError for anything else. */
+  async function mayRevert<T>(method: string, params: unknown[]): Promise<{ ok: true; value: T } | { ok: false; revert: Revert }> {
+    try {
+      return { ok: true, value: (await client.request({ method, params } as never)) as T };
+    } catch (e) {
+      const info = errorInfo(e);
+      if (isRevert(info)) return { ok: false, revert: decodeRevert(info.data, safe(info.message ?? "execution reverted")) };
+      throw rpcError(method, e);
+    }
+  }
+
   return {
     token,
     chainId: async () => Number(BigInt(await request<string>("eth_chainId", []))),
     tokenBalance: async (owner: Address) => (await read("balanceOf", [owner])) as bigint,
     authorizationUsed: async (authorizer: Address, nonce: Hex) => (await read("authorizationState", [authorizer, nonce])) as boolean,
+    /** eth_call of `data` on the token, from `from` when given. Null when it would succeed. */
+    simulate: async (data: Hex, from?: Address): Promise<Revert | null> => {
+      const r = await mayRevert<Hex>("eth_call", [{ ...(from ? { from } : {}), to: token, data }, "latest"]);
+      return r.ok ? null : r.revert;
+    },
   };
 }
 
