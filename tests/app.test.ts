@@ -4,10 +4,11 @@ import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
 import { ConfigError, loadConfig } from "../src/config.js";
 import { createFacilitator } from "../src/facilitator.js";
+import { FakeChain } from "./fake-chain.js";
 import { NOW_MS, signedPayment } from "./helpers.js";
 
 const key = generatePrivateKey();
-const app = createApp(createFacilitator({ now: () => NOW_MS }));
+const app = createApp(createFacilitator({ now: () => NOW_MS, transport: new FakeChain().transport }));
 const post = (path: string, body: unknown, headers: Record<string, string> = { "content-type": "application/json" }) =>
   app.request(path, { method: "POST", headers, body: typeof body === "string" ? body : JSON.stringify(body) });
 
@@ -59,6 +60,17 @@ describe("HTTP API", () => {
 });
 
 describe("loadConfig", () => {
+  it("reads RPC_URL and defaults to publicnode", () => {
+    expect(loadConfig({}).rpcUrl).toBe("https://robinhood-rpc.publicnode.com");
+    expect(loadConfig({ RPC_URL: " https://rpc.example/v2/abc " }).rpcUrl).toBe("https://rpc.example/v2/abc");
+    expect(() => loadConfig({ RPC_URL: "ws://rpc.example/secret" })).toThrow(ConfigError);
+    try {
+      loadConfig({ RPC_URL: "nope-secret" });
+    } catch (e) {
+      expect((e as Error).message).not.toContain("secret");
+    }
+  });
+
   it("reads VALIDITY_MARGIN_SECONDS", () => {
     expect(loadConfig({ VALIDITY_MARGIN_SECONDS: "10" }).validityMarginSeconds).toBe(10);
     expect(loadConfig({}).validityMarginSeconds).toBeUndefined();

@@ -15,6 +15,9 @@ export const USDG_DECIMALS = 6;
  */
 export const USDG_EIP712 = { name: "Global Dollar", version: "1" } as const;
 
+/** Public Robinhood Chain RPC (pruned, no archive). Pass your own with `rpcUrl` / `RPC_URL` for production. */
+export const DEFAULT_RPC_URL = "https://robinhood-rpc.publicnode.com";
+
 export const EXPLORER = "https://robinhoodchain.blockscout.com";
 export const txUrl = (hash: string) => `${EXPLORER}/tx/${hash}`;
 

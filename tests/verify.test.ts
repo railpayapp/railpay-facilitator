@@ -2,10 +2,11 @@ import { generatePrivateKey } from "viem/accounts";
 import { describe, expect, it } from "vitest";
 
 import { createFacilitator } from "../src/facilitator.js";
+import { FakeChain } from "./fake-chain.js";
 import { mutate, NOW_MS, NOW_S, PAY_TO, requirements, signedPayment } from "./helpers.js";
 
 const key = generatePrivateKey();
-const facilitator = () => createFacilitator({ now: () => NOW_MS });
+const facilitator = (chain = new FakeChain()) => createFacilitator({ now: () => NOW_MS, transport: chain.transport });
 
 describe("verify (signature, amount, recipient, window)", () => {
   it("accepts a correctly signed EIP-3009 authorization", async () => {
@@ -73,8 +74,70 @@ describe("verify (signature, amount, recipient, window)", () => {
 
   it("checks the window against the injected clock", async () => {
     const { payload, req } = await signedPayment({ key });
-    const later = createFacilitator({ now: () => NOW_MS + 600_000 });
+    const later = createFacilitator({ now: () => NOW_MS + 600_000, transport: new FakeChain().transport });
     expect((await later.verify(payload, req)).invalidReason).toBe("invalid_exact_evm_payload_authorization_valid_before");
+  });
+});
+
+describe("verify (on-chain)", () => {
+  it("reads the nonce state and the balance of the payer", async () => {
+    const chain = new FakeChain();
+    const { payload, req } = await signedPayment({ key });
+    expect((await facilitator(chain).verify(payload, req)).isValid).toBe(true);
+    expect(chain.count("eth_call")).toBe(2);
+  });
+
+  it("rejects an authorization whose nonce was already used", async () => {
+    const chain = new FakeChain();
+    const { payload, req, auth } = await signedPayment({ key });
+    chain.markUsed(auth.from, auth.nonce);
+    expect(await facilitator(chain).verify(payload, req)).toMatchObject({ isValid: false, invalidReason: "invalid_payload" });
+  });
+
+  it("rejects a payer without enough USDG", async () => {
+    const chain = new FakeChain();
+    const { payload, req, signer } = await signedPayment({ key });
+    chain.setBalance(signer, 9_999n);
+    expect((await facilitator(chain).verify(payload, req)).invalidReason).toBe("insufficient_funds");
+    chain.setBalance(signer, 10_000n);
+    expect((await facilitator(chain).verify(payload, req)).isValid).toBe(true);
+  });
+
+  it("refuses an RPC on another chain", async () => {
+    const chain = new FakeChain();
+    chain.chainId = 1;
+    const { payload, req } = await signedPayment({ key });
+    const r = await facilitator(chain).verify(payload, req);
+    expect(r).toMatchObject({ isValid: false, invalidReason: "unexpected_verify_error" });
+    expect(r.invalidMessage).toContain("chain 1");
+  });
+
+  it("answers unexpected_verify_error when the RPC fails", async () => {
+    const chain = new FakeChain();
+    chain.failures.set("eth_call", new Error("socket hang up"));
+    const { payload, req } = await signedPayment({ key });
+    expect((await facilitator(chain).verify(payload, req)).invalidReason).toBe("unexpected_verify_error");
+    chain.failures.set("eth_call", { code: -32005, message: "rate limited" });
+    const r = await facilitator(chain).verify(payload, req);
+    expect(r.invalidReason).toBe("unexpected_verify_error");
+    expect(r.invalidMessage).toContain("rate limited");
+  });
+
+  it("never puts the RPC URL in an answer", async () => {
+    const secret = "k3y-do-not-leak";
+    const f = createFacilitator({ now: () => NOW_MS, rpcUrl: `http://127.0.0.1:9/v2/${secret}` });
+    const { payload, req } = await signedPayment({ key });
+    const r = await f.verify(payload, req);
+    expect(r.invalidReason).toBe("unexpected_verify_error");
+    expect(JSON.stringify(r)).not.toContain(secret);
+    expect(JSON.stringify(r)).not.toContain("127.0.0.1");
+  });
+
+  it("does not touch the chain when an offline check fails", async () => {
+    const chain = new FakeChain();
+    const { payload, req } = await signedPayment({ key, value: 1n });
+    await facilitator(chain).verify(payload, req);
+    expect(chain.calls).toEqual([]);
   });
 });
 

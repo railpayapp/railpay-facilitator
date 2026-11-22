@@ -1,10 +1,15 @@
-import { recoverTypedDataAddress } from "viem";
+import { recoverTypedDataAddress, type Transport } from "viem";
 
-import { AUTHORIZATION_TYPES, CHAIN_ID, USDG, USDG_DECIMALS, USDG_EIP712 } from "./constants.js";
+import { createChain, RpcError } from "./chain.js";
+import { AUTHORIZATION_TYPES, CHAIN_ID, DEFAULT_RPC_URL, USDG, USDG_DECIMALS, USDG_EIP712 } from "./constants.js";
 import { parsePayment, parseRequestBody, type AssetConfig, type Failure, type ParsedPayment, type ParseResult } from "./parse.js";
 import { ErrorReason, type SupportedResponse, type VerifyResponse } from "./types.js";
 
 export type FacilitatorOptions = {
+  /** Robinhood Chain JSON-RPC. Default: publicnode. It may contain an API key: it is never logged or returned. */
+  rpcUrl?: string;
+  /** A viem transport instead of `rpcUrl` (tests pass `custom(...)`). */
+  transport?: Transport;
   /** Default 4663 (Robinhood Chain). */
   chainId?: number;
   /** Default USDG with its EIP-712 domain ("Global Dollar", "1"). */
@@ -24,6 +29,17 @@ export function createFacilitator(options: FacilitatorOptions = {}) {
   const now = options.now ?? Date.now;
   const nowSec = () => Math.floor(now() / 1000);
   const fail = (reason: ErrorReason, message: string): Failure => ({ ok: false, reason, message });
+  const chain = createChain({ asset, rpcUrl: options.rpcUrl ?? DEFAULT_RPC_URL, transport: options.transport });
+  let chainChecked = false;
+
+  /** The RPC must be on the configured chain. Checked once; an unreachable RPC is retried on the next call. */
+  async function checkChainId(): Promise<string | null> {
+    if (chainChecked) return null;
+    const id = await chain.chainId();
+    if (id !== chainId) return `The RPC is on chain ${id}, expected ${chainId}`;
+    chainChecked = true;
+    return null;
+  }
 
   // ---------- verification ----------
 
@@ -51,9 +67,23 @@ export function createFacilitator(options: FacilitatorOptions = {}) {
     return null;
   }
 
-  /** Everything `/verify` checks, in order: recipient, amount, window, signature. */
+  /** On-chain checks: the RPC's chain id, the authorization nonce is unused, the payer holds enough. */
+  async function chainChecks(p: ParsedPayment): Promise<Failure | null> {
+    try {
+      const wrongChain = await checkChainId();
+      if (wrongChain) return fail(ErrorReason.unexpectedVerify, wrongChain);
+      const [used, balance] = await Promise.all([chain.authorizationUsed(p.auth.from, p.auth.nonce), chain.tokenBalance(p.auth.from)]);
+      if (used) return fail(ErrorReason.invalidPayload, "This authorization nonce was already used on-chain");
+      if (balance < p.auth.value) return fail(ErrorReason.insufficientFunds, "The payer does not hold enough of the token");
+      return null;
+    } catch (e) {
+      return fail(ErrorReason.unexpectedVerify, e instanceof RpcError ? `Could not read the chain: ${e.message}` : "Could not read the chain");
+    }
+  }
+
+  /** Everything `/verify` checks, in order: recipient, amount, window, signature, then the chain. */
   async function checkAll(p: ParsedPayment): Promise<Failure | null> {
-    return authorizationChecks(p) ?? (await signatureCheck(p));
+    return authorizationChecks(p) ?? (await signatureCheck(p)) ?? (await chainChecks(p));
   }
 
   async function verifyParsed(r: ParseResult): Promise<VerifyResponse> {
