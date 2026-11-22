@@ -1,12 +1,19 @@
-import type { Hex } from "viem";
+import { isAddress, type Hex } from "viem";
 
-import { DEFAULT_RPC_URL } from "./constants.js";
+import { DEFAULT_RPC_URL, USDG_DECIMALS } from "./constants.js";
 import type { FacilitatorOptions } from "./facilitator.js";
+import { toUnits } from "./units.js";
 
 /** Environment variables read by `loadConfig` (`process.env` or Workers vars). */
 export type FacilitatorEnv = {
   OPERATOR_KEY?: string;
   RPC_URL?: string;
+  /** USDG decimal, e.g. "0.001". */
+  MIN_AMOUNT?: string;
+  /** USDG decimal, e.g. "100". */
+  MAX_AMOUNT?: string;
+  /** Comma or space separated addresses. */
+  PAY_TO_ALLOWLIST?: string;
   VALIDITY_MARGIN_SECONDS?: string;
   RECEIPT_TIMEOUT_MS?: string;
   MAX_GAS?: string;
@@ -28,6 +35,15 @@ function int(name: string, v: string | undefined, min = 0): number | undefined {
   return Number(s);
 }
 
+function wrap<T>(name: string, f: () => T): T {
+  try {
+    return f();
+  } catch (e) {
+    if (e instanceof ConfigError) throw e;
+    throw new ConfigError(`${name} is not a valid amount`);
+  }
+}
+
 /**
  * Turn environment variables into facilitator options. Throws ConfigError with a message that names the variable and
  * never contains its value (OPERATOR_KEY is a secret, RPC_URL may carry an API key).
@@ -40,10 +56,26 @@ export function loadConfig(env: FacilitatorEnv): Omit<FacilitatorOptions, "trans
 
   const rpcUrl = blank(env.RPC_URL) ? DEFAULT_RPC_URL : (env.RPC_URL as string).trim();
   if (!/^https?:\/\/\S+$/.test(rpcUrl)) throw new ConfigError("RPC_URL must be an http(s) URL");
+  const allow = blank(env.PAY_TO_ALLOWLIST)
+    ? []
+    : (env.PAY_TO_ALLOWLIST as string)
+        .split(/[\s,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+  for (const a of allow) if (!isAddress(a, { strict: false })) throw new ConfigError(`PAY_TO_ALLOWLIST has an invalid address: ${a}`);
+
+  const minAmount = blank(env.MIN_AMOUNT) ? undefined : wrap("MIN_AMOUNT", () => toUnits(env.MIN_AMOUNT as string, USDG_DECIMALS));
+  const maxAmount = blank(env.MAX_AMOUNT) ? undefined : wrap("MAX_AMOUNT", () => toUnits(env.MAX_AMOUNT as string, USDG_DECIMALS));
+  if (minAmount !== undefined && minAmount < 1n) throw new ConfigError("MIN_AMOUNT must be more than 0");
+  if (minAmount !== undefined && maxAmount !== undefined && maxAmount < minAmount) throw new ConfigError("MAX_AMOUNT must be at least MIN_AMOUNT");
+
   const maxGas = int("MAX_GAS", env.MAX_GAS, 21_000);
   return {
     operatorKey: operatorKey as Hex,
     rpcUrl,
+    minAmount,
+    maxAmount,
+    payToAllowlist: allow,
     validityMarginSeconds: int("VALIDITY_MARGIN_SECONDS", env.VALIDITY_MARGIN_SECONDS),
     receiptTimeoutMs: int("RECEIPT_TIMEOUT_MS", env.RECEIPT_TIMEOUT_MS, 1000),
     maxGas: maxGas === undefined ? undefined : BigInt(maxGas),

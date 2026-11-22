@@ -13,6 +13,7 @@ export type {
 } from "./types.js";
 export { parsePayment, parseRequestBody, type AssetConfig, type Authorization, type ParsedPayment, type ParseResult } from "./parse.js";
 export { createChain, decodeRevert, matchingTransfers, transferCalldata, RpcError, type Chain, type ChainOptions, type Revert, type RpcReceipt } from "./chain.js";
+export { toUnits, fromUnits } from "./units.js";
 export { createFacilitator, type Facilitator, type FacilitatorOptions, type Outcome } from "./facilitator.js";
 export { Mutex, QueueTimeoutError } from "./limits.js";
 export { createApp, type AppOptions } from "./app.js";

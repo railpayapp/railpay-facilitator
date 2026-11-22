@@ -1,12 +1,13 @@
-import { keccak256, recoverTypedDataAddress, type Address, type Hex, type Transport } from "viem";
+import { getAddress, isAddress, keccak256, recoverTypedDataAddress, type Address, type Hex, type Transport } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
 import { createChain, matchingTransfers, RpcError, transferCalldata, type Revert, type RpcReceipt } from "./chain.js";
-import { AUTHORIZATION_TYPES, CHAIN_ID, DEFAULT_RPC_URL, USDG, USDG_DECIMALS, USDG_EIP712 } from "./constants.js";
+import { AUTHORIZATION_TYPES, CHAIN_ID, DEFAULT_MAX_AMOUNT, DEFAULT_MIN_AMOUNT, DEFAULT_RPC_URL, USDG, USDG_DECIMALS, USDG_EIP712 } from "./constants.js";
 import { Mutex, QueueTimeoutError } from "./limits.js";
 import { parsePayment, parseRequestBody, type AssetConfig, type Failure, type ParsedPayment, type ParseResult } from "./parse.js";
 import { memoryStore, type SettlementRecord, type SettlementStore } from "./store.js";
 import { ErrorReason, type SettleResponse, type SupportedResponse, type VerifyResponse } from "./types.js";
+import { fromUnits } from "./units.js";
 
 export type FacilitatorOptions = {
   /** Operator private key (0x + 64 hex). It pays the gas of every settlement. Never logged or returned. */
@@ -19,6 +20,12 @@ export type FacilitatorOptions = {
   chainId?: number;
   /** Default USDG with its EIP-712 domain ("Global Dollar", "1"). */
   asset?: AssetConfig;
+  /** Smallest payment settled, base units. Default 1000 (0.001 USDG). */
+  minAmount?: bigint;
+  /** Largest payment settled, base units. Default 100000000 (100 USDG). */
+  maxAmount?: bigint;
+  /** Settle only payments to these addresses. Default: any payTo. */
+  payToAllowlist?: readonly string[];
   /** `validBefore` must be at least this many seconds in the future. Default 6. */
   validityMarginSeconds?: number;
   /** Refuse to settle when the gas estimate is above this. Default 300000 (a USDG transferWithAuthorization uses about 50000). */
@@ -57,6 +64,12 @@ export function createFacilitator(options: FacilitatorOptions) {
   const chainId = options.chainId ?? CHAIN_ID;
   const network = `eip155:${chainId}`;
   const asset: AssetConfig = options.asset ?? { address: USDG, name: USDG_EIP712.name, version: USDG_EIP712.version, decimals: USDG_DECIMALS };
+  const minAmount = options.minAmount ?? DEFAULT_MIN_AMOUNT;
+  const maxAmount = options.maxAmount ?? DEFAULT_MAX_AMOUNT;
+  if (minAmount < 1n) throw new RangeError("minAmount must be at least 1 base unit");
+  if (maxAmount < minAmount) throw new RangeError("maxAmount must be at least minAmount");
+  for (const a of options.payToAllowlist ?? []) if (!isAddress(a, { strict: false })) throw new TypeError(`payToAllowlist has an invalid address: ${a}`);
+  const allowlist = options.payToAllowlist?.length ? new Set(options.payToAllowlist.map((a) => a.toLowerCase())) : null;
   const margin = options.validityMarginSeconds ?? 6;
   if (!Number.isInteger(margin) || margin < 0) throw new RangeError("validityMarginSeconds must be a non-negative integer");
   const maxGas = options.maxGas ?? 300_000n;
@@ -87,6 +100,17 @@ export function createFacilitator(options: FacilitatorOptions) {
   }
 
   // ---------- verification ----------
+
+  const usdg = (units: bigint) => `${fromUnits(units, asset.decimals)} USDG`;
+
+  /** Operator policy: amount range, payTo allowlist, no self-payments (they would only burn the operator's gas). */
+  function policy(p: ParsedPayment): Failure | null {
+    if (p.amount < minAmount) return fail(ErrorReason.invalidRequirements, `The amount is below the smallest payment this facilitator settles (${usdg(minAmount)})`);
+    if (p.amount > maxAmount) return fail(ErrorReason.invalidRequirements, `The amount is above the largest payment this facilitator settles (${usdg(maxAmount)})`);
+    if (allowlist && !allowlist.has(p.payTo.toLowerCase())) return fail(ErrorReason.invalidRequirements, "This facilitator does not settle payments to this payTo address");
+    if (p.payer.toLowerCase() === p.payTo.toLowerCase()) return fail(ErrorReason.invalidPayload, "The payer and payTo are the same address");
+    return null;
+  }
 
   /** Recipient, amount and validity window against the requirements and the clock. */
   function authorizationChecks(p: ParsedPayment): Failure | null {
@@ -141,9 +165,9 @@ export function createFacilitator(options: FacilitatorOptions) {
     }
   }
 
-  /** Everything `/verify` checks, in order: recipient, amount, window, signature, then the chain. */
+  /** Everything `/verify` checks, in order: policy, recipient, amount, window, signature, then the chain. */
   async function checkAll(p: ParsedPayment, unexpected: ErrorReason): Promise<Failure | null> {
-    return authorizationChecks(p) ?? (await signatureCheck(p)) ?? (await chainChecks(p, unexpected));
+    return policy(p) ?? authorizationChecks(p) ?? (await signatureCheck(p)) ?? (await chainChecks(p, unexpected));
   }
 
   async function verifyParsed(r: ParseResult): Promise<VerifyResponse> {
@@ -380,6 +404,7 @@ export function createFacilitator(options: FacilitatorOptions) {
     network,
     chainId,
     asset,
+    limits: { minAmount, maxAmount, payToAllowlist: allowlist ? [...allowlist].map((a) => getAddress(a)) : null },
 
     /** Read-only: is this payment valid right now? Never writes state or sends a transaction. */
     verify: (paymentPayload: unknown, paymentRequirements: unknown): Promise<VerifyResponse> =>

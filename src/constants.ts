@@ -18,6 +18,11 @@ export const USDG_EIP712 = { name: "Global Dollar", version: "1" } as const;
 /** Public Robinhood Chain RPC (pruned, no archive). Pass your own with `rpcUrl` / `RPC_URL` for production. */
 export const DEFAULT_RPC_URL = "https://robinhood-rpc.publicnode.com";
 
+/** Default smallest payment this facilitator settles: 0.001 USDG (base units). Below that the gas is not worth it. */
+export const DEFAULT_MIN_AMOUNT = 1_000n;
+/** Default largest payment this facilitator settles: 100 USDG (base units). */
+export const DEFAULT_MAX_AMOUNT = 100_000_000n;
+
 export const EXPLORER = "https://robinhoodchain.blockscout.com";
 export const txUrl = (hash: string) => `${EXPLORER}/tx/${hash}`;
 

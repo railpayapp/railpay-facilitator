@@ -46,6 +46,11 @@ export function createApp(facilitator: Facilitator, options: AppOptions = {}) {
       network: facilitator.network,
       asset: facilitator.asset.address,
       operator: facilitator.operator,
+      limits: {
+        minAmount: facilitator.limits.minAmount.toString(),
+        maxAmount: facilitator.limits.maxAmount.toString(),
+        payToAllowlist: facilitator.limits.payToAllowlist,
+      },
       endpoints: ["POST /verify", "POST /settle", "GET /supported"],
       docs: "https://github.com/railpayapp/railpay-facilitator",
     }),
