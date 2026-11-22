@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0] - 2026-11-22
+
+Operator protections.
+
+- Amount limits: 0.001 to 100 USDG by default (`MIN_AMOUNT`, `MAX_AMOUNT`). Outside them `/verify` and `/settle` answer `invalid_payment_requirements` before reading the chain.
+- Optional `payTo` allowlist (`PAY_TO_ALLOWLIST`). Self-payments (payer = `payTo`) are refused: they would only burn the operator's gas.
+- Rate limits, in memory: new settlements per `payTo` per hour (`RATE_LIMIT_PAYTO_PER_HOUR`, default 120) and `/verify` + `/settle` requests per client IP per minute (`RATE_LIMIT_IP_PER_MINUTE`, default 60). Both answer 429 with `Retry-After`. The Node server reads the socket address, or the last `X-Forwarded-For` entry with `TRUST_PROXY`.
+- Low-gas pause: settlement stops while the operator holds less than `MIN_OPERATOR_ETH` (default 0.0005 ETH), before anything is claimed or counted, and resumes as soon as it is funded.
+- Gas price cap: `MAX_FEE_PER_GAS_GWEI` refuses to send while the base fee is above it and caps the max fee offered.
+- `GET /health`: operator address and ETH balance, the RPC's chain id, the version, and whether settlement is open (200) or paused (503, with the reason).
+- Exports `toUnits`, `fromUnits`, `RateLimiter`, `lastForwardedFor`, `DEFAULT_MIN_AMOUNT`, `DEFAULT_MAX_AMOUNT`, `DEFAULT_MIN_OPERATOR_ETH`.
+
 ## [0.3.0] - 2026-11-22
 
 Settlement with your own operator key.
