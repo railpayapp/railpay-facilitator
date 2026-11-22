@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0] - 2026-11-22
+
+Settlement with your own operator key.
+
+- `POST /settle`: verifies again (simulation from the operator), claims the authorization, sends `transferWithAuthorization` with EIP-1559 fees from the operator key, waits for the receipt and answers success only with status 1 and exactly one matching USDG `Transfer` log. Answers the spec's `SettleResponse`.
+- Idempotent: an atomic claim per authorization, the signed transaction stored before broadcast, and a single success answer per authorization, also across facilitators that share a store.
+- One sender per process (FIFO queue), so operator nonces never collide. 503 with `Retry-After` when the operator cannot pay the gas, the estimate is above `MAX_GAS` or the queue is busy.
+- Reconcile: calling `/settle` again after `settlement_pending`, a timeout or a restart rebroadcasts the identical signed bytes and waits again. A new transaction is sent only when the old one provably can never be mined, and only by one caller. An authorization that expires before mining is reported, never retried.
+- Stores: `memoryStore()` and `sqliteStore(path)` (`railpay-facilitator/sqlite`, `node:sqlite`). The Node server uses SQLite by default (`STORE`, `SQLITE_PATH`).
+- New settings: `OPERATOR_KEY` (required), `RECEIPT_TIMEOUT_MS`, `MAX_GAS`. `/supported` lists the operator as signer.
+- Tests run the real `railpay-sdk` v0.1.0 seller (`createPaywall`) against this facilitator.
+
 ## [0.2.0] - 2026-11-22
 
 On-chain checks. Still no `/settle`.
