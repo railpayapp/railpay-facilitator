@@ -9,6 +9,7 @@ An x402 seller answers `402 Payment Required`, the buyer signs a payment, and a 
 - `POST /verify` checks a payment without touching it: request shape, signature, recipient, amount, validity window, then the chain (authorization nonce, payer balance, a simulated `transferWithAuthorization`).
 - `POST /settle` verifies again, sends `transferWithAuthorization` from your **operator** key (which pays the gas), waits for the receipt and answers success only when the exact USDG `Transfer` log is on-chain.
 - One authorization never gets two transactions from this facilitator, and never two success answers.
+- Operator protections: amount limits, an optional `payTo` allowlist, rate limits per `payTo` and per IP, a low-gas pause and a gas price cap. `GET /health` reports the operator's ETH and whether settlement is open.
 
 ## Quick start (Node)
 
@@ -49,6 +50,14 @@ The SDK seller calls `POST /settle` only, then reads the receipt and the `Transf
 | `VALIDITY_MARGIN_SECONDS` | `6` | `validBefore` must be at least this far in the future, at verification and again right before sending |
 | `RECEIPT_TIMEOUT_MS` | `20000` | How long `/settle` waits for the receipt before answering `settlement_pending` (minimum 1000) |
 | `MAX_GAS` | `300000` | Refuse to send when the gas estimate is above this. A USDG settlement estimates at about 48,000 |
+| `MIN_AMOUNT` | `0.001` | Smallest payment settled, in USDG |
+| `MAX_AMOUNT` | `100` | Largest payment settled, in USDG |
+| `PAY_TO_ALLOWLIST` | empty (any) | Comma or space separated addresses. When set, only payments to these are verified and settled |
+| `RATE_LIMIT_PAYTO_PER_HOUR` | `120` | New settlements per `payTo` per hour. `0` disables |
+| `RATE_LIMIT_IP_PER_MINUTE` | `60` | `/verify` + `/settle` requests per client IP per minute. `0` disables |
+| `MIN_OPERATOR_ETH` | `0.0005` | Settlement pauses while the operator holds less ETH than this |
+| `MAX_FEE_PER_GAS_GWEI` | none | Refuse to send while the base fee is above this, and never offer a higher max fee |
+| `TRUST_PROXY` | off | Node: take the client IP from the last `X-Forwarded-For` entry (set only behind one reverse proxy you run) |
 | `STORE` | `sqlite` | Node: `sqlite` (survives restarts) or `memory` (lost on restart) |
 | `SQLITE_PATH` | `./railpay-facilitator.db` | Node: SQLite file for settlement records |
 | `PORT` | `8787` | Node: listen port |
@@ -90,11 +99,12 @@ Same request body as `/verify`. Answers the spec's `SettleResponse`:
 
 What happens:
 
-1. Every `/verify` check runs again, and the simulation runs from the operator address.
-2. The authorization is **claimed** in the store (an atomic insert): a concurrent or repeated call for the same authorization stops here.
-3. One sender at a time per process: estimate gas, read EIP-1559 fees (max fee = 2 × base fee + priority fee) and the operator's pending nonce, check the operator can pay `gas × maxFee`, sign.
-4. The signed transaction and its hash are **written to the store before broadcast**, so the store always knows any hash that may be on the wire.
-5. Broadcast, then wait for the receipt (`RECEIPT_TIMEOUT_MS`). Success requires status 1 **and** exactly one USDG `Transfer(payer → payTo, amount)` log.
+1. Every `/verify` check runs again (including the amount limits and allowlist), and the simulation runs from the operator address.
+2. Operator guards: the operator holds at least `MIN_OPERATOR_ETH`, and the `payTo` is under its hourly limit.
+3. The authorization is **claimed** in the store (an atomic insert): a concurrent or repeated call for the same authorization stops here.
+4. One sender at a time per process: estimate gas (≤ `MAX_GAS`), read EIP-1559 fees (max fee = 2 × base fee + priority fee, capped by `MAX_FEE_PER_GAS_GWEI`) and the operator's pending nonce, check the operator can pay `gas × maxFee`, sign.
+5. The signed transaction and its hash are **written to the store before broadcast**, so the store always knows any hash that may be on the wire.
+6. Broadcast, then wait for the receipt (`RECEIPT_TIMEOUT_MS`). Success requires status 1 **and** exactly one USDG `Transfer(payer → payTo, amount)` log.
 
 | Outcome | HTTP | Body |
 |---|---|---|
@@ -103,12 +113,36 @@ What happens:
 | Broadcast, not confirmed yet | 200 | `errorReason: "settlement_pending"`, `transaction` = the hash |
 | Mined but reverted, or no exact `Transfer` log | 200 | `errorReason: "invalid_transaction_state"`, `transaction` = the hash. Terminal |
 | Already settled by this facilitator | 200 | `errorReason: "invalid_payload"`, `transaction: ""` |
-| Operator cannot pay the gas, gas estimate over `MAX_GAS`, sender busy | 503 + `Retry-After` | `errorReason: "unexpected_settle_error"`, nothing sent |
+| Amount outside the limits, `payTo` not allowed | 200 | `errorReason: "invalid_payment_requirements"`, nothing sent |
+| Payer and `payTo` are the same address | 200 | `errorReason: "invalid_payload"`, nothing sent |
+| Too many settlements to this `payTo`, or requests from this IP | 429 + `Retry-After` | `errorReason: "unexpected_settle_error"`, nothing sent |
+| Operator ETH below the minimum, gas estimate over `MAX_GAS`, base fee over the cap, sender busy, RPC unreadable | 503 + `Retry-After` | `errorReason: "unexpected_settle_error"`, nothing sent |
 | The RPC refused the transaction (it was not broadcast) | 502 | `errorReason: "unexpected_settle_error"`, the claim is released |
 
 **Retrying is safe.** Call `/settle` again with the same payload after `settlement_pending` (or a timeout, or a restart) and it reconciles instead of sending anew: it looks for the receipt, rebroadcasts the **identical signed bytes** (same hash, so never a second transaction) and waits again. It starts a new transaction only when the old one provably can never be mined (another transaction took its operator nonce), and then only one caller can do it. If the chain clock passes `validBefore` before the transaction is mined, the answer is `invalid_exact_evm_payload_authorization_valid_before`: mined later, the token reverts it and nothing moves.
 
 A success answer is handed out once per authorization. A later call answers `invalid_payload` with the transaction hash in `errorMessage`.
+
+### `GET /health`
+
+Not part of the x402 spec. `200` while settlement is open, `503` while it is paused, so an uptime monitor can alert on low gas.
+
+```json
+{
+  "ok": true,
+  "version": "0.4.0",
+  "network": "eip155:4663",
+  "chainId": 4663,
+  "rpcChainId": 4663,
+  "asset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+  "operator": "0x…",
+  "ethBalance": "1000000000000000",
+  "minEthBalance": "500000000000000",
+  "canSettle": true
+}
+```
+
+When paused, `ok` and `canSettle` are false and `reason` says why: the operator needs ETH, the RPC is unreachable, or the RPC is on another chain. Balances are in wei. Cached for 5 seconds.
 
 ### `GET /supported`
 
@@ -147,7 +181,9 @@ const app = createApp(facilitator); // a Hono app: app.fetch(request)
 
 - The operator key signs one kind of transaction: `transferWithAuthorization` on USDG, with `value: 0`. It cannot move anyone's funds without their EIP-3009 signature, and it holds no USDG. What it can lose is its ETH, spent as gas.
 - Gas is spent only after every check and a successful simulation. A transaction can still revert if the payer moves funds between the simulation and the block; that gas is lost and the answer says so.
-- `/settle` has no authentication. Anyone who can reach it can make the operator pay gas for valid payments to any `payTo`. Keep it on `127.0.0.1` or a private network until the next release adds amount limits, a `payTo` allowlist, rate limits and a low-gas guard.
+- `/settle` has no authentication. Anyone who can reach it can make the operator pay gas for any valid payment within the limits. A real payment costs the attacker the payment itself (the USDG goes to `payTo`), so the cheapest abuse is many 0.001 USDG payments between wallets they control. Raise `MIN_AMOUNT`, set `PAY_TO_ALLOWLIST` to your own sellers, and keep the per-`payTo` and per-IP limits.
+- Rate limits live in memory, per process: they reset on restart, and the per-IP limit needs a correct client IP (`TRUST_PROXY` only behind your own proxy).
+- Keep only a small amount of ETH on the operator and top it up. `MIN_OPERATOR_ETH` stops settlement before the key is drained to zero; `/health` turns `503` at the same point.
 - The RPC URL and the operator key never appear in logs, errors or answers.
 
 ## Development
