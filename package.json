@@ -1,0 +1,55 @@
+{
+  "name": "railpay-facilitator",
+  "version": "0.0.0",
+  "description": "Self-hostable x402 v2 facilitator for Robinhood Chain: verifies and settles exact-scheme USDG payments (EIP-3009) with your own operator key.",
+  "license": "MIT",
+  "homepage": "https://docs.railpay.app",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/railpayapp/railpay-facilitator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/railpayapp/railpay-facilitator/issues"
+  },
+  "author": "RailPay",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepare": "pnpm run build"
+  },
+  "keywords": [
+    "railpay",
+    "x402",
+    "facilitator",
+    "usdg",
+    "robinhood-chain",
+    "eip-3009",
+    "payments",
+    "stablecoin"
+  ],
+  "devDependencies": {
+    "@types/node": "26.1.1",
+    "tsup": "8.5.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  },
+  "packageManager": "pnpm@12.16.1"
+}
