@@ -26,7 +26,8 @@ export type SettlementRecord = {
   tx?: string;
   /** Signed raw transaction, kept so the identical transaction can be rebroadcast. */
   raw?: string;
-  /** Operator account nonce of `raw`. */
+  /** Operator address that signed `raw`, and its account nonce. */
+  operator?: string;
   operatorNonce?: number;
   error?: string;
   createdAt: number;

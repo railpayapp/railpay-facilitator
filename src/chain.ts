@@ -204,6 +204,12 @@ export function createChain(options: ChainOptions) {
         .catch(() => 0n);
       return { baseFee, maxPriorityFeePerGas: priority, maxFeePerGas: baseFee * 2n + priority };
     },
+    /** Timestamp of the latest block, seconds. */
+    blockTimestamp: async () => {
+      const block = await request<{ timestamp?: string } | null>("eth_getBlockByNumber", ["latest", false]);
+      if (!block?.timestamp) throw new RpcError("eth_getBlockByNumber", "eth_getBlockByNumber: no latest block", true);
+      return BigInt(block.timestamp);
+    },
     sendRawTransaction: (raw: Hex) => request<Hex>("eth_sendRawTransaction", [raw]),
     receipt: (hash: Hex) => request<RpcReceipt | null>("eth_getTransactionReceipt", [hash]),
     transaction: (hash: Hex) => request<Record<string, unknown> | null>("eth_getTransactionByHash", [hash]),

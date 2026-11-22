@@ -23,7 +23,11 @@ export type FacilitatorOptions = {
   validityMarginSeconds?: number;
   /** Refuse to settle when the gas estimate is above this. Default 300000 (a USDG transferWithAuthorization uses about 50000). */
   maxGas?: bigint;
-  /** How long `settle` waits for the receipt before answering `settlement_pending`. Default 20000 ms. */
+  /**
+   * How long `settle` waits for the receipt before answering `settlement_pending`. Default 20000 ms.
+   * A later `settle` with the same payload reconciles: it rebroadcasts the identical signed transaction and waits up to
+   * min(receiptTimeoutMs, 5000) ms again.
+   */
   receiptTimeoutMs?: number;
   /** Receipt polling interval. Default 500 ms. */
   pollIntervalMs?: number;
@@ -212,26 +216,74 @@ export function createFacilitator(options: FacilitatorOptions) {
       return { status: 200, body: { success: true, transaction: tx, network, payer, amount: p.amount.toString() } };
     }
 
+    /**
+     * An earlier attempt left a submitted transaction (a receipt timeout, a lost answer, a restart). Look for its
+     * receipt, rebroadcast the identical signed bytes (same hash, so it can never become a second transaction), or
+     * prove it can never transfer. "dead" = another transaction took its operator nonce: it can never be mined.
+     */
+    async function reconcile(rec: SettlementRecord): Promise<Outcome<SettleResponse> | "dead"> {
+      const tx = rec.tx as Hex;
+      const first = await chain.receipt(tx).catch(() => undefined);
+      if (first) return finish(rec, first);
+      if (first === undefined) return pending(tx); // the RPC is in trouble: nothing can be proven
+      if (rec.raw) {
+        await chain.sendRawTransaction(rec.raw as Hex).catch(() => undefined); // "already known" and "nonce too low" are fine
+        log("settle.rebroadcast", { tx, operatorNonce: rec.operatorNonce });
+      }
+      const second = await waitReceipt(tx, Math.min(receiptTimeoutMs, 5_000));
+      if (second) return finish(rec, second);
+      // Chain time and the operator nonce first, then the receipt once more: a transaction mined in between shows up.
+      const facts = await Promise.all([
+        chain.blockTimestamp(),
+        rec.operator && rec.operatorNonce !== undefined ? chain.nonce(rec.operator as Address, "latest") : Promise.resolve(undefined),
+      ]).catch(() => null);
+      if (!facts) return pending(tx);
+      const third = await chain.receipt(tx).catch(() => undefined);
+      if (third) return finish(rec, third);
+      if (third === undefined) return pending(tx);
+      const [blockTime, latestNonce] = facts;
+      if (latestNonce !== undefined && rec.operatorNonce !== undefined && latestNonce > rec.operatorNonce) {
+        log("settle.dropped", { tx, operatorNonce: rec.operatorNonce });
+        return "dead";
+      }
+      if (blockTime >= p.auth.validBefore) {
+        // Mined from now on, the token reverts it: no transfer can happen.
+        await store.put(k, { ...rec, state: "failed", raw: undefined, error: "expired before it was mined", updatedAt: now() });
+        log("settle.expired", { tx });
+        return no(ErrorReason.validBefore, "The authorization expired before the settlement transaction was mined. Nothing was transferred.", { tx, payer });
+      }
+      return pending(tx);
+    }
+
     // 1. An authorization this facilitator already touched.
+    let restartFrom: SettlementRecord | null = null;
     const prior = await store.get(k);
     if (prior) {
       if (inflight.has(k) || prior.state === "settling") return no(ErrorReason.invalidTransactionState, "This authorization is already being settled by this facilitator", { payer });
       if (prior.state === "settled") return no(ErrorReason.invalidPayload, `This authorization was already settled in ${prior.tx}`, { payer });
       if (prior.state === "failed") return no(ErrorReason.invalidTransactionState, `An earlier settlement of this authorization failed (${prior.error ?? "unknown"})`, { payer });
-      // submitted: the receipt decides.
-      const tx = prior.tx as Hex;
       inflight.add(k);
+      let out: Outcome<SettleResponse> | "dead";
       try {
-        const receipt = await chain.receipt(tx).catch(() => null);
-        return receipt ? await finish(prior, receipt) : pending(tx);
+        out = await reconcile(prior);
       } finally {
         inflight.delete(k);
       }
+      if (out !== "dead") return out;
+      // Exactly one caller may start over after a provably dead transaction.
+      const marker: SettlementRecord = { ...prior, state: "failed", raw: undefined, error: "dropped", updatedAt: now() };
+      if (!(await store.claim(`${k}#dropped:${prior.tx}`, marker))) {
+        return no(ErrorReason.invalidTransactionState, "This authorization is already being settled by this facilitator", { payer });
+      }
+      restartFrom = prior;
     }
 
     // 2. Re-verify everything, including the simulation from the operator.
     const bad = await checkAll(p, ErrorReason.unexpectedSettle);
-    if (bad) return no(bad.reason, bad.message, { payer });
+    if (bad) {
+      if (restartFrom) await store.delete(k); // the dead transaction can never land, and this caller owns the restart
+      return no(bad.reason, bad.message, { payer });
+    }
 
     // 3. Claim: one settlement per authorization, across every process sharing the store.
     const t = now();
@@ -244,7 +296,8 @@ export function createFacilitator(options: FacilitatorOptions) {
       updatedAt: t,
       expiresAt: Number(p.auth.validBefore) * 1000 + RETAIN_AFTER_EXPIRY_MS,
     };
-    if (!(await store.claim(k, claimed))) return no(ErrorReason.invalidTransactionState, "This authorization is already being settled by this facilitator", { payer });
+    if (restartFrom) await store.put(k, { ...claimed, createdAt: restartFrom.createdAt });
+    else if (!(await store.claim(k, claimed))) return no(ErrorReason.invalidTransactionState, "This authorization is already being settled by this facilitator", { payer });
     inflight.add(k);
 
     // 4. One sender: gas, nonce, sign, persist, broadcast, receipt.
@@ -280,7 +333,7 @@ export function createFacilitator(options: FacilitatorOptions) {
 
       const raw = await account.signTransaction({ chainId, type: "eip1559", to: asset.address, data, nonce, gas, maxFeePerGas, maxPriorityFeePerGas, value: 0n });
       const tx = keccak256(raw);
-      const submitted: SettlementRecord = { ...claimed, state: "submitted", tx, raw, operatorNonce: nonce, updatedAt: now() };
+      const submitted: SettlementRecord = { ...claimed, state: "submitted", tx, raw, operator, operatorNonce: nonce, updatedAt: now() };
       await store.put(k, submitted); // before broadcasting: the store always knows every hash that may be on the wire
       persisted = true;
       try {
