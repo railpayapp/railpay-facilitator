@@ -46,7 +46,7 @@ export type FacilitatorOptions = {
   validityMarginSeconds?: number;
   /** Refuse to settle while the operator holds less ETH than this (wei). Default 0.0005 ETH. */
   minOperatorEth?: bigint;
-  /** Refuse to settle when the gas estimate is above this. Default 300000 (a USDG transferWithAuthorization uses about 50000). */
+  /** Refuse to settle when the gas estimate is above this. Default 300000 (a USDG transferWithAuthorization to a new payTo used about 102000 on a fork). */
   maxGas?: bigint;
   /** Refuse to settle while the base fee is above this (wei per gas), and never offer more. Default: no cap. */
   maxFeePerGas?: bigint;

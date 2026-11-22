@@ -41,6 +41,7 @@
     "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
     "start": "node dist/node.js",
     "test": "vitest run",
+    "test:fork": "FORK_TEST=1 vitest run tests/fork.test.ts",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "smoke": "node scripts/smoke.mjs",

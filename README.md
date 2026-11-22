@@ -49,7 +49,7 @@ The SDK seller calls `POST /settle` only, then reads the receipt and the `Transf
 | `RPC_URL` | `https://robinhood-rpc.publicnode.com` | Robinhood Chain JSON-RPC. Use your own (Alchemy, dRPC) in production. It may contain an API key: it is never logged or returned in an answer |
 | `VALIDITY_MARGIN_SECONDS` | `6` | `validBefore` must be at least this far in the future, at verification and again right before sending |
 | `RECEIPT_TIMEOUT_MS` | `20000` | How long `/settle` waits for the receipt before answering `settlement_pending` (minimum 1000) |
-| `MAX_GAS` | `300000` | Refuse to send when the gas estimate is above this. A USDG settlement estimates at about 48,000 |
+| `MAX_GAS` | `300000` | Refuse to send when the gas estimate is above this. A USDG settlement to a new `payTo` used about 102,000 gas on a fork |
 | `MIN_AMOUNT` | `0.001` | Smallest payment settled, in USDG |
 | `MAX_AMOUNT` | `100` | Largest payment settled, in USDG |
 | `PAY_TO_ALLOWLIST` | empty (any) | Comma or space separated addresses. When set, only payments to these are verified and settled |
