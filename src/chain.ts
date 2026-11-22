@@ -4,8 +4,10 @@ import {
   decodeFunctionResult,
   encodeFunctionData,
   http,
+  pad,
   parseAbi,
   parseSignature,
+  toEventSelector,
   type Address,
   type Hex,
   type Transport,
@@ -26,6 +28,8 @@ export const TOKEN_ABI = parseAbi([
  * Robinhood Chain reverts with (checked with eth_call). Error(string) and Panic(uint256) are decoded by viem.
  */
 export const TOKEN_ERRORS = parseAbi(["error InsufficientFunds()", "error InvalidSignature()"]);
+
+export const TRANSFER_TOPIC = toEventSelector("Transfer(address,address,uint256)");
 
 /** An RPC call failed. The message never contains the RPC URL (it may hold an API key) or the request body. */
 export class RpcError extends Error {
@@ -72,6 +76,9 @@ export function errorInfo(err: unknown): ErrorInfo {
 /** A call that the contract reverted. */
 export type Revert = { data?: Hex; name?: string; message: string };
 
+export type RpcLog = { address: string; topics: string[]; data: string; logIndex?: string };
+export type RpcReceipt = { status: string; transactionHash: string; blockNumber: string; gasUsed?: string; effectiveGasPrice?: string; logs: RpcLog[] };
+
 /** A short message that is safe to log and return: no URLs, no request bodies. */
 export function safe(text: string) {
   return text.replace(/https?:\/\/\S+/g, "[url]").replace(/\s+/g, " ").slice(0, 200);
@@ -112,6 +119,20 @@ export function transferCalldata(auth: Authorization, signature: Hex): Hex {
     functionName: "transferWithAuthorization",
     args: [auth.from, auth.to, auth.value, auth.validAfter, auth.validBefore, auth.nonce, vv, r, s],
   });
+}
+
+/** Number of Transfer(from → to, value) logs the token emitted in a receipt. */
+export function matchingTransfers(receipt: RpcReceipt, token: Address, from: Address, to: Address, value: bigint) {
+  const f = pad(from.toLowerCase() as Hex);
+  const t = pad(to.toLowerCase() as Hex);
+  return receipt.logs.filter(
+    (l) =>
+      l.address.toLowerCase() === token.toLowerCase() &&
+      l.topics[0]?.toLowerCase() === TRANSFER_TOPIC &&
+      l.topics[1]?.toLowerCase() === f &&
+      l.topics[2]?.toLowerCase() === t &&
+      BigInt(l.data) === value,
+  ).length;
 }
 
 export type ChainOptions = {
@@ -160,6 +181,7 @@ export function createChain(options: ChainOptions) {
   return {
     token,
     chainId: async () => Number(BigInt(await request<string>("eth_chainId", []))),
+    ethBalance: async (address: Address) => BigInt(await request<string>("eth_getBalance", [address, "latest"])),
     tokenBalance: async (owner: Address) => (await read("balanceOf", [owner])) as bigint,
     authorizationUsed: async (authorizer: Address, nonce: Hex) => (await read("authorizationState", [authorizer, nonce])) as boolean,
     /** eth_call of `data` on the token, from `from` when given. Null when it would succeed. */
@@ -167,6 +189,24 @@ export function createChain(options: ChainOptions) {
       const r = await mayRevert<Hex>("eth_call", [{ ...(from ? { from } : {}), to: token, data }, "latest"]);
       return r.ok ? null : r.revert;
     },
+    estimateGas: async (from: Address, data: Hex) => {
+      const r = await mayRevert<string>("eth_estimateGas", [{ from, to: token, data }]);
+      return r.ok ? ({ ok: true, gas: BigInt(r.value) } as const) : ({ ok: false, revert: r.revert } as const);
+    },
+    nonce: async (address: Address, tag: "pending" | "latest") => Number(BigInt(await request<string>("eth_getTransactionCount", [address, tag]))),
+    /** EIP-1559 fees: maxFee = 2 × latest base fee + priority fee (0 if the node has no eth_maxPriorityFeePerGas). */
+    fees: async () => {
+      const block = await request<{ baseFeePerGas?: string } | null>("eth_getBlockByNumber", ["latest", false]);
+      if (!block?.baseFeePerGas) throw new RpcError("eth_getBlockByNumber", "eth_getBlockByNumber: the chain reports no EIP-1559 base fee", true);
+      const baseFee = BigInt(block.baseFeePerGas);
+      const priority = await request<string>("eth_maxPriorityFeePerGas", [])
+        .then((p) => BigInt(p))
+        .catch(() => 0n);
+      return { baseFee, maxPriorityFeePerGas: priority, maxFeePerGas: baseFee * 2n + priority };
+    },
+    sendRawTransaction: (raw: Hex) => request<Hex>("eth_sendRawTransaction", [raw]),
+    receipt: (hash: Hex) => request<RpcReceipt | null>("eth_getTransactionReceipt", [hash]),
+    transaction: (hash: Hex) => request<Record<string, unknown> | null>("eth_getTransactionByHash", [hash]),
     tokenName: async () => {
       const out = await request<Hex>("eth_call", [{ to: token, data: encodeFunctionData({ abi: TOKEN_ABI, functionName: "name" }) }, "latest"]);
       return decodeFunctionResult({ abi: TOKEN_ABI, functionName: "name", data: out }) as string;

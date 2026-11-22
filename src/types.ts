@@ -79,6 +79,22 @@ export type VerifyResponse = {
   payer?: string;
 };
 
+/**
+ * Answer of `POST /settle` (spec 5.3). `errorMessage` is not in the spec table; it carries a human-readable
+ * explanation, the same field the x402 reference implementation and the RailPay SDK use.
+ */
+export type SettleResponse = {
+  success: boolean;
+  errorReason?: ErrorReason;
+  errorMessage?: string;
+  payer?: string;
+  /** Transaction hash, or "" when no transaction was broadcast for this call. */
+  transaction: string;
+  network: string;
+  /** Amount settled, base units (only on success). */
+  amount?: string;
+};
+
 export type SupportedKind = { x402Version: number; scheme: string; network: string; extra?: Record<string, unknown> };
 
 /** Answer of `GET /supported` (spec 7.3). */

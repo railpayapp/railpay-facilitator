@@ -3,10 +3,10 @@ import { describe, expect, it } from "vitest";
 
 import { createFacilitator } from "../src/facilitator.js";
 import { FakeChain, revertData } from "./fake-chain.js";
-import { mutate, NOW_MS, NOW_S, PAY_TO, requirements, signedPayment } from "./helpers.js";
+import { mutate, NOW_MS, NOW_S, OPERATOR, OPERATOR_KEY, PAY_TO, requirements, signedPayment } from "./helpers.js";
 
 const key = generatePrivateKey();
-const facilitator = (chain = new FakeChain()) => createFacilitator({ now: () => NOW_MS, transport: chain.transport });
+const facilitator = (chain = new FakeChain()) => createFacilitator({ operatorKey: OPERATOR_KEY, now: () => NOW_MS, transport: chain.transport });
 
 describe("verify (signature, amount, recipient, window)", () => {
   it("accepts a correctly signed EIP-3009 authorization", async () => {
@@ -74,7 +74,7 @@ describe("verify (signature, amount, recipient, window)", () => {
 
   it("checks the window against the injected clock", async () => {
     const { payload, req } = await signedPayment({ key });
-    const later = createFacilitator({ now: () => NOW_MS + 600_000, transport: new FakeChain().transport });
+    const later = createFacilitator({ operatorKey: OPERATOR_KEY, now: () => NOW_MS + 600_000, transport: new FakeChain().transport });
     expect((await later.verify(payload, req)).invalidReason).toBe("invalid_exact_evm_payload_authorization_valid_before");
   });
 });
@@ -151,7 +151,7 @@ describe("verify (on-chain)", () => {
 
   it("never puts the RPC URL in an answer", async () => {
     const secret = "k3y-do-not-leak";
-    const f = createFacilitator({ now: () => NOW_MS, rpcUrl: `http://127.0.0.1:9/v2/${secret}` });
+    const f = createFacilitator({ operatorKey: OPERATOR_KEY, now: () => NOW_MS, rpcUrl: `http://127.0.0.1:9/v2/${secret}` });
     const { payload, req } = await signedPayment({ key });
     const r = await f.verify(payload, req);
     expect(r.invalidReason).toBe("unexpected_verify_error");
@@ -169,6 +169,6 @@ describe("verify (on-chain)", () => {
 
 describe("supported", () => {
   it("lists exact on Robinhood Chain", () => {
-    expect(facilitator().supported()).toEqual({ kinds: [{ x402Version: 2, scheme: "exact", network: "eip155:4663" }], extensions: [], signers: {} });
+    expect(facilitator().supported()).toEqual({ kinds: [{ x402Version: 2, scheme: "exact", network: "eip155:4663" }], extensions: [], signers: { "eip155:*": [OPERATOR] } });
   });
 });

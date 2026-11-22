@@ -1,5 +1,5 @@
 import { getAddress, type Hex } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 import { AUTHORIZATION_TYPES, USDG } from "../src/constants.js";
 import type { PaymentPayload, PaymentRequirements } from "../src/types.js";
@@ -8,6 +8,10 @@ export const PAY_TO = getAddress("0x00000000000000000000000000000000000b0b0b");
 export const PAYER = getAddress("0x0000000000000000000000000000000000a11ce0");
 export const NONCE = `0x${"11".repeat(32)}` as Hex;
 export const FAKE_SIGNATURE = `0x${"ab".repeat(65)}` as Hex;
+
+/** A throwaway operator key, generated for this test run. It never holds anything. */
+export const OPERATOR_KEY = generatePrivateKey();
+export const OPERATOR = privateKeyToAccount(OPERATOR_KEY).address;
 
 /** Requirements the way the RailPay SDK seller sends them. */
 export function requirements(over: Partial<PaymentRequirements> = {}): PaymentRequirements {

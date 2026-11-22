@@ -3,9 +3,14 @@ import {
   decodeFunctionData,
   encodeErrorResult,
   encodeFunctionResult,
+  keccak256,
+  pad,
   parseAbi,
+  parseTransaction,
+  recoverTransactionAddress,
   recoverTypedDataAddress,
   serializeSignature,
+  toEventSelector,
   toHex,
   type Address,
   type Hex,
@@ -33,6 +38,19 @@ export type RpcFailure = { code: number; message: string; data?: Hex } | Error;
 
 type CallTx = { from?: string; to: string; data: Hex };
 
+export type FakeReceipt = {
+  status: Hex;
+  transactionHash: Hex;
+  blockNumber: Hex;
+  gasUsed: Hex;
+  effectiveGasPrice: Hex;
+  logs: { address: string; topics: Hex[]; data: Hex; logIndex: Hex }[];
+};
+
+const TRANSFER = toEventSelector("Transfer(address,address,uint256)");
+/** Gas a USDG transferWithAuthorization uses on Robinhood Chain. */
+export const TRANSFER_GAS = 48_412n;
+
 /** An in-memory Robinhood Chain with USDG, enough for the facilitator's JSON-RPC calls. */
 export class FakeChain {
   chainId = 4663;
@@ -52,6 +70,29 @@ export class FakeChain {
   /** `from` of every transferWithAuthorization eth_call. */
   simulatedFrom: (string | undefined)[] = [];
 
+  /** ETH balance of any address without an explicit one (1 ETH). */
+  defaultEth = 10n ** 18n;
+  eth = new Map<string, bigint>();
+  /** Base fee, wei (0.02 gwei, as on Robinhood Chain). */
+  baseFee = 20_000_000n;
+  /** Answer of eth_estimateGas for a transfer that would succeed. */
+  estimate = TRANSFER_GAS;
+  /** Mine each transaction as soon as it is sent. False: it waits in `mempool` until `mine()`. */
+  autoMine = true;
+  /** Raw transactions accepted by eth_sendRawTransaction, in order. */
+  sent: Hex[] = [];
+  mempool: Hex[] = [];
+  receipts = new Map<string, FakeReceipt>();
+  /** Account nonces of mined transactions. */
+  nonces = new Map<string, number>();
+  block = 100;
+  /** Accept the transaction, then fail the eth_sendRawTransaction answer (lost response). */
+  loseSendResponse = false;
+  /** Mine the next transaction without its Transfer log (a token that misbehaves). */
+  omitTransferLog = false;
+  /** Runs right before a transaction is mined (front-run the settlement, for example). */
+  beforeMine: (() => void) | null = null;
+
   balanceOf(address: string) {
     return this.balances.get(address.toLowerCase()) ?? this.defaultBalance;
   }
@@ -67,6 +108,24 @@ export class FakeChain {
   count(method: string) {
     return this.calls.filter((m) => m === method).length;
   }
+  ethOf(address: string) {
+    return this.eth.get(address.toLowerCase()) ?? this.defaultEth;
+  }
+  setEth(address: string, value: bigint) {
+    this.eth.set(address.toLowerCase(), value);
+  }
+  nonceOf(address: string) {
+    return this.nonces.get(address.toLowerCase()) ?? 0;
+  }
+  /** Mine every transaction waiting in the mempool, in order. */
+  async mine() {
+    const txs = this.mempool.splice(0);
+    for (const raw of txs) await this.apply(raw);
+  }
+  /** Forget the mempool, as a node that restarted or evicted the transactions. */
+  dropMempool() {
+    this.mempool = [];
+  }
 
   async request({ method, params }: { method: string; params?: unknown }): Promise<unknown> {
     this.calls.push(method);
@@ -81,6 +140,34 @@ export class FakeChain {
         return toHex(this.chainId);
       case "eth_call":
         return this.call(params[0] as CallTx);
+      case "eth_getBalance":
+        return toHex(this.ethOf(params[0] as string));
+      case "eth_getTransactionCount": {
+        const address = String(params[0]).toLowerCase();
+        let n = this.nonceOf(address);
+        if (params[1] === "pending") {
+          for (const raw of this.mempool) if ((await recoverTransactionAddress({ serializedTransaction: raw as never })).toLowerCase() === address) n++;
+        }
+        return toHex(n);
+      }
+      case "eth_estimateGas": {
+        const tx = params[0] as CallTx;
+        await this.call(tx);
+        return toHex(this.estimate);
+      }
+      case "eth_getBlockByNumber":
+        return { number: toHex(this.block), timestamp: toHex(this.timestamp), baseFeePerGas: toHex(this.baseFee) };
+      case "eth_maxPriorityFeePerGas":
+        return "0x0";
+      case "eth_sendRawTransaction":
+        return this.send(params[0] as Hex);
+      case "eth_getTransactionReceipt":
+        return this.receipts.get(String(params[0]).toLowerCase()) ?? null;
+      case "eth_getTransactionByHash": {
+        const hash = String(params[0]).toLowerCase();
+        const known = this.receipts.has(hash) || this.mempool.some((raw) => keccak256(raw) === hash);
+        return known ? { hash } : null;
+      }
       default:
         throw { code: -32601, message: `the fake chain does not support ${method}` };
     }
@@ -121,6 +208,52 @@ export class FakeChain {
     if (this.isUsed(t.from, t.nonce)) revert(encodeErrorResult({ abi: ERRORS, errorName: "AuthorizationUsed" }));
     if (t.signer?.toLowerCase() !== t.from.toLowerCase()) revert(revertData.invalidSignature);
     if (this.balanceOf(t.from) < t.value) revert(revertData.insufficientFunds);
+  }
+
+  protected async send(raw: Hex): Promise<Hex> {
+    const hash = keccak256(raw);
+    if (this.receipts.has(hash) || this.mempool.some((r) => keccak256(r) === hash)) throw { code: -32000, message: "already known" };
+    const tx = parseTransaction(raw);
+    if (tx.chainId !== this.chainId) throw { code: -32000, message: "invalid chain id" };
+    const from = await recoverTransactionAddress({ serializedTransaction: raw as never });
+    let expected = this.nonceOf(from);
+    for (const r of this.mempool) if ((await recoverTransactionAddress({ serializedTransaction: r as never })).toLowerCase() === from.toLowerCase()) expected++;
+    if ((tx.nonce ?? 0) < expected) throw { code: -32000, message: "nonce too low" };
+    if ((tx.nonce ?? 0) > expected) throw { code: -32000, message: "nonce too high" };
+    if (this.ethOf(from) < (tx.gas ?? 0n) * (tx.maxFeePerGas ?? 0n)) throw { code: -32000, message: "insufficient funds for gas * price + value" };
+    this.sent.push(raw);
+    this.mempool.push(raw);
+    if (this.autoMine) await this.mine();
+    if (this.loseSendResponse) throw new Error("socket hang up");
+    return hash;
+  }
+
+  /** Mine one transaction: nonce, gas, then the token's own checks at mining time. */
+  protected async apply(raw: Hex) {
+    const hash = keccak256(raw);
+    const tx = parseTransaction(raw);
+    const from = await recoverTransactionAddress({ serializedTransaction: raw as never });
+    this.beforeMine?.();
+    this.nonces.set(from.toLowerCase(), this.nonceOf(from) + 1);
+    const price = this.baseFee + (tx.maxPriorityFeePerGas ?? 0n);
+    this.setEth(from, this.ethOf(from) - TRANSFER_GAS * price);
+    this.block++;
+    const receipt: FakeReceipt = { status: "0x1", transactionHash: hash, blockNumber: toHex(this.block), gasUsed: toHex(TRANSFER_GAS), effectiveGasPrice: toHex(price), logs: [] };
+    try {
+      if (tx.to?.toLowerCase() !== this.token.toLowerCase() || !tx.data) throw new Error("not a token call");
+      const t = await this.decodeTransfer(tx.data);
+      this.checkTransfer(t);
+      this.setBalance(t.from, this.balanceOf(t.from) - t.value);
+      this.setBalance(t.to, this.balanceOf(t.to) + t.value);
+      this.markUsed(t.from, t.nonce);
+      if (!this.omitTransferLog) {
+        receipt.logs.push({ address: this.token, topics: [TRANSFER, pad(t.from.toLowerCase() as Hex), pad(t.to.toLowerCase() as Hex)], data: pad(toHex(t.value)), logIndex: "0x0" });
+      }
+      this.omitTransferLog = false;
+    } catch {
+      receipt.status = "0x0";
+    }
+    this.receipts.set(hash, receipt);
   }
 
   /** A viem transport for `createFacilitator({ transport })`. */
