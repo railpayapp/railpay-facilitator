@@ -19,7 +19,15 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "isolatedModules": true,
-    "outDir": "dist"
+    "outDir": "dist",
+    "paths": {
+      "railpay-facilitator": [
+        "./src/index.ts"
+      ],
+      "railpay-facilitator/*": [
+        "./src/*.ts"
+      ]
+    }
   },
   "include": [
     "src",

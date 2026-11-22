@@ -1,0 +1,15 @@
+{
+  "name": "my-facilitator",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "railpay-facilitator": "https://github.com/railpayapp/railpay-facilitator/releases/download/v0.5.0/railpay-facilitator-0.5.0.tgz"
+  },
+  "devDependencies": {
+    "wrangler": "4.165.0"
+  }
+}
