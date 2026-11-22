@@ -57,7 +57,13 @@ const payload = {
   accepted: req,
   payload: { signature, authorization: { ...auth, value: "1000", validAfter: auth.validAfter.toString(), validBefore: auth.validBefore.toString() } },
 };
-const verdict = await createFacilitator({ rpcUrl }).verify(payload, req);
+// A throwaway operator key, generated here and never funded: verify and health only read the chain.
+const facilitator = createFacilitator({ rpcUrl, operatorKey: generatePrivateKey() });
+const verdict = await facilitator.verify(payload, req);
 check(verdict.isValid === false && verdict.invalidReason === "insufficient_funds", `verify(empty wallet) = ${verdict.invalidReason}`);
+
+// 6. Health from the real chain: an unfunded operator is reported as unable to settle.
+const health = await facilitator.health();
+check(health.rpcChainId === CHAIN_ID && health.ethBalance === "0" && health.canSettle === false, `health(unfunded operator): canSettle=${health.canSettle}, "${health.reason}"`);
 
 console.log("smoke ok");
