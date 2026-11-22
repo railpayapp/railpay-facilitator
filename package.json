@@ -23,10 +23,15 @@
     "./sqlite": {
       "types": "./dist/sqlite.d.ts",
       "import": "./dist/sqlite.js"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "import": "./dist/worker.js"
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "wrangler.json"
   ],
   "sideEffects": false,
   "engines": {

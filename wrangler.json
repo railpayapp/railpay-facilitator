@@ -1,0 +1,19 @@
+{
+  "name": "railpay-facilitator",
+  "main": "dist/worker.js",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "durable_objects": {
+    "bindings": [{ "name": "FACILITATOR", "class_name": "RailPayFacilitator" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RailPayFacilitator"] }],
+  "vars": {
+    "MIN_AMOUNT": "0.001",
+    "MAX_AMOUNT": "100",
+    "PAY_TO_ALLOWLIST": "",
+    "RATE_LIMIT_PAYTO_PER_HOUR": "120",
+    "RATE_LIMIT_IP_PER_MINUTE": "60",
+    "MIN_OPERATOR_ETH": "0.0005"
+  },
+  "observability": { "enabled": true }
+}

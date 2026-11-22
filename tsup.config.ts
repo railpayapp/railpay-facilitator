@@ -2,8 +2,8 @@ import { defineConfig } from "tsup";
 
 export default defineConfig([
   {
-    // Runtime-neutral library.
-    entry: ["src/index.ts"],
+    // Runtime-neutral library and the Cloudflare Workers entry.
+    entry: ["src/index.ts", "src/worker.ts"],
     format: ["esm"],
     dts: true,
     sourcemap: true,
