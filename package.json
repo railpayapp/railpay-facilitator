@@ -34,6 +34,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
+    "smoke": "node scripts/smoke.mjs",
     "prepare": "pnpm run build"
   },
   "keywords": [

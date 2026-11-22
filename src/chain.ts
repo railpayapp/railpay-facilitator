@@ -17,6 +17,8 @@ export const TOKEN_ABI = parseAbi([
   "function balanceOf(address owner) view returns (uint256)",
   "function authorizationState(address authorizer, bytes32 nonce) view returns (bool)",
   "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s)",
+  "function name() view returns (string)",
+  "function DOMAIN_SEPARATOR() view returns (bytes32)",
 ]);
 
 /**
@@ -164,6 +166,14 @@ export function createChain(options: ChainOptions) {
     simulate: async (data: Hex, from?: Address): Promise<Revert | null> => {
       const r = await mayRevert<Hex>("eth_call", [{ ...(from ? { from } : {}), to: token, data }, "latest"]);
       return r.ok ? null : r.revert;
+    },
+    tokenName: async () => {
+      const out = await request<Hex>("eth_call", [{ to: token, data: encodeFunctionData({ abi: TOKEN_ABI, functionName: "name" }) }, "latest"]);
+      return decodeFunctionResult({ abi: TOKEN_ABI, functionName: "name", data: out }) as string;
+    },
+    domainSeparator: async () => {
+      const out = await request<Hex>("eth_call", [{ to: token, data: encodeFunctionData({ abi: TOKEN_ABI, functionName: "DOMAIN_SEPARATOR" }) }, "latest"]);
+      return decodeFunctionResult({ abi: TOKEN_ABI, functionName: "DOMAIN_SEPARATOR", data: out }) as Hex;
     },
   };
 }
