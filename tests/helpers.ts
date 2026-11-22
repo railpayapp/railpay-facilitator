@@ -1,6 +1,7 @@
 import { getAddress, type Hex } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 
-import { USDG } from "../src/constants.js";
+import { AUTHORIZATION_TYPES, USDG } from "../src/constants.js";
 import type { PaymentPayload, PaymentRequirements } from "../src/types.js";
 
 export const PAY_TO = getAddress("0x00000000000000000000000000000000000b0b0b");
@@ -53,4 +54,40 @@ export function mutate<T>(value: T, f: (draft: any) => void): T {
   const copy = structuredClone(value);
   f(copy);
   return copy;
+}
+
+// ---------- real EIP-3009 signatures from throwaway keys ----------
+
+export const NOW_MS = 1_800_000_000_000;
+export const NOW_S = BigInt(NOW_MS / 1000);
+
+export type SignOptions = Partial<Omit<AuthorizationInput, "from">> & {
+  key: Hex;
+  req?: PaymentRequirements;
+  /** Sign over another domain (wrong chain, wrong token name). */
+  domain?: Partial<{ name: string; version: string; chainId: number; verifyingContract: Hex }>;
+};
+
+let nonceCounter = 0;
+export const freshNonce = () => `0x${(++nonceCounter).toString(16).padStart(64, "0")}` as Hex;
+
+/** A payload signed the way an x402 client (or the RailPay agent wallet) signs it. */
+export async function signedPayment(o: SignOptions): Promise<{ payload: PaymentPayload; req: PaymentRequirements; auth: AuthorizationInput; signer: Hex }> {
+  const account = privateKeyToAccount(o.key);
+  const req = o.req ?? requirements();
+  const auth: AuthorizationInput = {
+    from: account.address,
+    to: o.to ?? req.payTo,
+    value: o.value ?? BigInt(req.amount),
+    validAfter: o.validAfter ?? NOW_S - 60n,
+    validBefore: o.validBefore ?? NOW_S + 300n,
+    nonce: o.nonce ?? freshNonce(),
+  };
+  const signature = await account.signTypedData({
+    domain: { name: "Global Dollar", version: "1", chainId: 4663, verifyingContract: USDG, ...o.domain },
+    types: AUTHORIZATION_TYPES,
+    primaryType: "TransferWithAuthorization",
+    message: { ...auth, from: getAddress(auth.from), to: getAddress(auth.to) },
+  });
+  return { payload: payload(auth, signature, req), req, auth, signer: account.address };
 }

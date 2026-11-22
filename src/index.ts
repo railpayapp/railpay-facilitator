@@ -11,3 +11,4 @@ export type {
   VerifyResponse,
 } from "./types.js";
 export { parsePayment, parseRequestBody, type AssetConfig, type Authorization, type ParsedPayment, type ParseResult } from "./parse.js";
+export { createFacilitator, type Facilitator, type FacilitatorOptions } from "./facilitator.js";
